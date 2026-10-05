@@ -14,50 +14,69 @@ window.addEventListener('load', () => {
   if (lenis && typeof lenis.scrollTo === "function") {
     lenis.scrollTo(0, { immediate: true, force: true });
   }
+  // Extra refresh once every subresource (images, webfont) has actually
+  // loaded. The reveal ScrollTriggers are created earlier, as soon as a
+  // page's markup is in the DOM — before a late webfont swap or hero image
+  // load can finish settling the layout — so an above-the-fold once:true
+  // trigger measured against that not-yet-final layout could otherwise
+  // never fire. 'load' only ever runs once per real page load, so this
+  // doesn't affect normal Barba navigations.
+  if (typeof ScrollTrigger !== "undefined") ScrollTrigger.refresh();
 });
 
 let lenis = null;
 let nextPage = document;
 let onceFunctionsInitialized = false;
 let navTimeline = null;
-// b83 — true from the moment a Barba navigation starts (barba.hooks.
-// before) until closeNavForTransition() has actually run (leave
-// timeline's onComplete, screen covered). While true, a link's
-// mouseleave is suppressed entirely (see initNavLinkHoverEffects) so its
-// hover color doesn't revert to the default while the menu is still
-// visually open — see closeNavForTransition's comment for the fuller
-// picture; this is the same "keep it visually frozen until actually
-// hidden" idea b81 applied to the char roll, now applied to color too.
+// True from the moment a Barba navigation starts (barba.hooks.before)
+// until closeNavForTransition() actually runs (leave timeline's
+// onComplete, screen covered). While true, a link's mouseleave is
+// suppressed (see initNavLinkHoverEffects) so its hover color doesn't
+// revert while the menu is still visually open — it stays frozen until
+// closeNavForTransition resets everything at once, unseen.
 let navigatingAway = false;
+// Recomputes the nav's resting (non-hovered) colors from the current
+// page; assigned inside initNavLinkHoverEffects, called again on every
+// Barba navigation from barba.hooks.afterEnter.
+let updateNavRestingColors = () => {};
 // Instant (non-animated) version of closeNav(), assigned inside
-// initFullScreenNavigation. forceResetNavLinks (the full visual close)
-// is now called from the leave timeline's onComplete, once the screen is
-// actually covered (b81 — see that callback's comment); barba.hooks.
+// initFullScreenNavigation. forceResetNavLinks (the full visual close) is
+// called from the leave timeline's onComplete, once the screen is
+// actually covered — see closeNavForTransition's comment; barba.hooks.
 // before calls only disableNavLinkPointerEvents immediately.
 let forceResetNavLinks = () => {};
 let disableNavLinkPointerEvents = () => {};
 
-// b81 — the actual visual nav close for an in-flight navigation, now
-// called from the leave timeline's onComplete (screen fully covered)
-// instead of from barba.hooks.before (screen not covered yet). Pulls
-// together everything the old hooks.before block used to do
-// synchronously: flip the status attribute so CSS treats it as closed,
-// pause/reset navTimeline, force-hide the tile, reset hover state, and
-// the belt-and-suspenders char reset.
+// The actual visual nav close for an in-flight navigation — called from
+// the leave timeline's onComplete (screen fully covered) rather than
+// synchronously from barba.hooks.before, so it never happens while the
+// outgoing page is still visible underneath. Flips the status attribute
+// so CSS treats it as closed, pauses/resets navTimeline, force-hides the
+// tile, resets hover state, and does a belt-and-suspenders char reset.
 function closeNavForTransition() {
   const navStatusEl = document.querySelector('[data-navigation-status]');
   if (navStatusEl) {
     navStatusEl.setAttribute('data-navigation-status', 'not-active');
   }
-  navDebugSnapshot('closeNavForTransition:start (before pause)');
   if (navTimeline) {
     navTimeline.pause(0);
   }
   forceResetNavLinks();
   hardResetNavChars();
-  navDebugSnapshot('closeNavForTransition:end (after pause + forceResetNavLinks + hardResetNavChars)');
   navigatingAway = false;
 }
+
+// b131 — animated nav close for a navigation started from the open menu:
+// assigned inside initFullScreenNavigation; resolves once the menu has
+// finished closing (immediately if it's already closed).
+let closeNavAnimated = () => Promise.resolve();
+// True while a transition began with the menu open: the leave swaps the
+// pages behind the open menu, then the enter closes the menu and fades the
+// new page in. leaveDone flags the leave's prepare step as finished.
+let navWasOpenForTransition = false;
+let leaveDone = false;
+// b144 — nav class/colour sync held back until the open menu has closed.
+let pendingNavUpdateData = null;
 
 const hasLenis = typeof window.Lenis !== "undefined";
 const hasScrollTrigger = typeof window.ScrollTrigger !== "undefined";
@@ -78,31 +97,14 @@ gsap.defaults({ ease: "osmo", duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b83';
+const BUILD = 'b150';
 console.log('[build]', BUILD);
 
-// Temporary diagnostic logging for the hero-video park/reclaim sequence —
-// timestamped so the actual gap between "shutter closed" and "new frame
-// visible" can be read straight out of the console on a real, focused tab
-// (a backgrounded/automated tab throttles rAF and makes the timing here
-// meaningless). Remove once the flash-on-return bug is confirmed fixed.
-const bunnyLogStart = performance.now();
-function bunnyLog() {
-  var args = Array.prototype.slice.call(arguments);
-  args.unshift('[bunny-park] t=' + (performance.now() - bunnyLogStart).toFixed(0) + 'ms');
-  console.log.apply(console, args);
-}
-
-// b78 — belt-and-suspenders hard reset, called right alongside
-// forceResetNavLinks() in barba.hooks.before. navTimeline.pause(0) SHOULD
-// already put every nav-char back to its hidden yPercent:100 (and
-// forceResetNavLinks/resetAllLinks already force the hover-roll CLONE
-// chars back to their own hidden yPercent:0 — see leave()'s skipRoll
-// path), but this explicitly re-asserts both directly via gsap.set()
-// rather than relying on the timeline's lazy/cached tween start-values,
-// in case THAT'S what's letting the current page's own link render
-// briefly visible on the very next openNav(). No-op in the normal case
-// where pause(0) already did its job correctly.
+// Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
+// in barba.hooks.before: explicitly re-asserts every nav-char back to
+// hidden via gsap.set(), rather than relying on navTimeline.pause(0)'s
+// own (lazy/cached) tween start-values. No-op when pause(0) already did
+// its job correctly.
 function hardResetNavChars() {
   const dbg = window.__navDebug;
   if (!dbg) return;
@@ -112,73 +114,6 @@ function hardResetNavChars() {
     dbg.linkConfigs.forEach(entry => {
       if (entry.cloneChars) gsap.set(entry.cloneChars, { yPercent: 0 });
     });
-  }
-}
-
-// Diagnostic only (b79) — b78's snapshots proved SOMETHING sets a nav
-// link's .nav-char elements back to a fully-revealed inline transform
-// between hooks.enter and hooks.afterEnter, while navTimeline itself sits
-// at progress 0 the whole time (so it isn't navTimeline doing it). Rather
-// than guess again at what that "something" is, watch the live nav DOM
-// for style-attribute mutations and log a stack trace for each one, for a
-// few seconds right after a navigation starts — the trace tells us
-// exactly which function is responsible.
-let navMutationObserver = null;
-function watchNavCharMutations() {
-  try {
-    if (navMutationObserver) { navMutationObserver.disconnect(); navMutationObserver = null; }
-    const navEl = document.querySelector('[data-navigation-status]');
-    if (!navEl) return;
-    navMutationObserver = new MutationObserver(mutations => {
-      mutations.forEach(m => {
-        const el = m.target;
-        if (!(el instanceof Element) || !el.classList.contains('nav-char')) return;
-        const linkEl = el.closest('.nav__link');
-        bunnyLog('MUTATION on .nav-char — link:', linkEl ? linkEl.className : '(no link)',
-          'newTransform:', el.style.transform,
-          '\n' + (new Error('nav-char style mutation trace')).stack);
-      });
-    });
-    navMutationObserver.observe(navEl, { subtree: true, attributes: true, attributeFilter: ['style'] });
-    bunnyLog('watchNavCharMutations: observing started');
-    setTimeout(() => {
-      if (navMutationObserver) { navMutationObserver.disconnect(); navMutationObserver = null; bunnyLog('watchNavCharMutations: observing stopped (timeout)'); }
-    }, 8000);
-  } catch (err) {
-    bunnyLog('watchNavCharMutations threw:', err && err.message);
-  }
-}
-
-// Diagnostic only (b78) — snapshots exactly what the "current page" nav
-// link's chars/clone look like at a handful of key moments around a Barba
-// navigation, to pin down why its item still shows briefly-visible-then-
-// flashes on the FIRST menu open after landing on a new page (but not the
-// second). Reads straight off the live nav DOM (via classList / data
-// tracked on window.__navDebug, set up by initFullScreenNavigation) rather
-// than closing over any particular function's locals, so it can be called
-// from anywhere (barba hooks, openNav, initBarbaNavUpdate).
-function navDebugSnapshot(label) {
-  try {
-    const dbg = window.__navDebug;
-    if (!dbg) { bunnyLog('navDebugSnapshot(' + label + '): __navDebug not ready yet'); return; }
-    const report = dbg.navLinkEls.map((linkEl, i) => {
-      if (!linkEl) return { i, cls: '(no linkEl)' };
-      const split = dbg.navLinkSplits[i];
-      const chars = split ? split.chars : [];
-      const entry = dbg.linkConfigs ? dbg.linkConfigs.get(linkEl) : null;
-      return {
-        i,
-        cls: linkEl.className,
-        isCurrent: linkEl.classList.contains('w--current'),
-        firstCharTransform: chars[0] ? chars[0].style.transform : null,
-        lastCharTransform: chars.length ? chars[chars.length - 1].style.transform : null,
-        cloneFirstTransform: entry && entry.cloneChars && entry.cloneChars[0] ? entry.cloneChars[0].style.transform : '(no cloneChars)',
-        rollTweenActive: !!(entry && entry.rollTween && entry.rollTween.isActive())
-      };
-    });
-    bunnyLog('navDebugSnapshot(' + label + ') navTimeline.progress=' + (dbg.navTimeline ? dbg.navTimeline.progress().toFixed(3) : 'n/a') + ':', JSON.stringify(report));
-  } catch (err) {
-    bunnyLog('navDebugSnapshot(' + label + ') threw:', err && err.message);
   }
 }
 
@@ -218,16 +153,264 @@ addConsoleBrand();
 // FUNCTION REGISTRY
 // -----------------------------------------
 
+// b121 — .field focus -> its sibling .field_label loses "large" (floats up);
+// blur with an empty value -> gets it back. focusin/focusout bubble, so one
+// listener on document covers every current and future .field.
+//
+// b122 — browser autofill fills the field WITHOUT firing focus, so the label
+// stayed big and overlapped the filled text. Now the label state is derived
+// from the field itself (has a value, or is :-webkit-autofill) via
+// syncFieldLabel, run on input/change events and re-checked a few times
+// shortly after each page enter (Chrome autofills a beat after load, and
+// doesn't always expose .value until interaction — :-webkit-autofill does
+// match though).
+function syncFieldLabel(field) {
+  const labels = Array.from(field.parentElement ? field.parentElement.children : [])
+    .filter(el => el !== field && el.classList.contains('field_label'));
+  let autofilled = false;
+  try { autofilled = field.matches(':-webkit-autofill'); } catch (e) {}
+  const filled = field.value.length > 0 || autofilled || document.activeElement === field;
+  labels.forEach(label => label.classList.toggle('large', !filled));
+}
+
+function syncAllFormFieldLabels(scope) {
+  (scope || document).querySelectorAll('.field').forEach(syncFieldLabel);
+}
+
+// Autofill lands at unpredictable times after load — re-check a few times.
+function syncFormFieldLabelsSoon(scope) {
+  syncAllFormFieldLabels(scope);
+  [100, 400, 1000, 2000].forEach(ms => setTimeout(() => syncAllFormFieldLabels(scope), ms));
+}
+
+function initFormFieldLabels() {
+  const fieldFrom = (e) => (e.target.closest ? e.target.closest('.field') : null);
+
+  document.addEventListener('focusin', (e) => {
+    const field = fieldFrom(e);
+    if (field) syncFieldLabel(field);
+  });
+  document.addEventListener('focusout', (e) => {
+    const field = fieldFrom(e);
+    if (field) syncFieldLabel(field);
+  });
+  // Autofill / paste / programmatic fills dispatch input and/or change.
+  document.addEventListener('input', (e) => {
+    const field = fieldFrom(e);
+    if (field) syncFieldLabel(field);
+  });
+  document.addEventListener('change', (e) => {
+    const field = fieldFrom(e);
+    if (field) syncFieldLabel(field);
+  });
+  // Chrome fires an animationstart-less autofill; this catches the case where
+  // the first autofill is applied on the first user click anywhere.
+  document.addEventListener('click', () => setTimeout(() => syncAllFormFieldLabels(), 50), { passive: true });
+
+  syncFormFieldLabelsSoon();
+}
+
+// b123 — the visible "Send message" button is a styled <a class="btn"> sitting
+// next to Webflow's real (hidden) submit input (.submit_button) inside
+// .submit-button__wrap. Clicking the link triggers the real form submit via
+// requestSubmit(submitter), which — unlike a bare .click() on a detached
+// handler — runs native validation (required fields, email format, minlength)
+// and fires the form's "submit" event, so Basin/Turnstile + Webflow's own
+// handlers behave exactly as if the real button was pressed. Delegated on
+// document (capture phase, bound once) so it survives Barba page swaps.
+function initFormSubmitMirror() {
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('.submit-button__wrap .btn');
+    if (!btn) return;
+    const wrap = btn.closest('.submit-button__wrap');
+    const realSubmit = wrap && wrap.querySelector('.submit_button, input[type="submit"], button[type="submit"]');
+    const form = (realSubmit && realSubmit.form) || btn.closest('form');
+    if (!form) return;
+
+    e.preventDefault(); // href="#" — don't jump / let Barba treat it as a nav
+
+    if (typeof form.requestSubmit === 'function') {
+      try {
+        form.requestSubmit(realSubmit || undefined);
+        return;
+      } catch (err) { /* fall through */ }
+    }
+    if (realSubmit) realSubmit.click();
+    else form.submit();
+  }, true);
+}
+
+// b125 — mirror the real submit button's sending state onto the custom .btn.
+// Webflow swaps the real button's value to its "Waiting text" (set per-button
+// in the Designer) while the form posts, then restores it. We mirror that
+// text onto the .btn, falling back to "Sending message…" if no waiting text
+// is configured. .btn__middle's label is a roll-hover (char-split, fixed
+// width) built by initButtonHoverFocus, so rather than rewriting that markup
+// we hide it and show a plain status span while sending, then put it back.
+// Done when Webflow shows its success/fail block, hides the form, or the
+// button's value returns to its original.
+const FORM_SENDING_FALLBACK = 'Sending message…';
+
+function setBtnStatus(btn, text) {
+  const middle = btn.querySelector('.btn__middle');
+  if (!middle) return;
+  let status = middle.querySelector('.btn__status');
+  const rollWrap = Array.from(middle.children).find(el => !el.classList.contains('btn__status'));
+  if (text) {
+    if (!status) {
+      status = document.createElement('span');
+      status.className = 'btn__status';
+      middle.appendChild(status);
+    }
+    status.textContent = text;
+    if (rollWrap) rollWrap.style.display = 'none';
+    btn.setAttribute('aria-busy', 'true');
+    btn.style.pointerEvents = 'none'; // no double-submits while sending
+  } else {
+    if (status) status.remove();
+    if (rollWrap) rollWrap.style.display = '';
+    btn.removeAttribute('aria-busy');
+    btn.style.pointerEvents = '';
+  }
+}
+
+function watchFormSending(form) {
+  const wrap = form.querySelector('.submit-button__wrap');
+  const btn = wrap && wrap.querySelector('.btn');
+  const real = wrap && wrap.querySelector('.submit_button, input[type="submit"], button[type="submit"]');
+  if (!btn || !real || btn._sendingWatch) return;
+
+  const origValue = real.value;
+  const root = form.closest('.w-form') || form.parentElement;
+  const started = performance.now();
+  let valueChanged = false;
+
+  const visible = (el) => !!(el && el.offsetParent !== null && getComputedStyle(el).display !== 'none');
+  const finish = () => {
+    clearInterval(btn._sendingWatch);
+    btn._sendingWatch = null;
+    setBtnStatus(btn, null);
+  };
+
+  btn._sendingWatch = setInterval(() => {
+    const elapsed = performance.now() - started;
+    if (real.value !== origValue) valueChanged = true;
+    setBtnStatus(btn, real.value !== origValue ? real.value : FORM_SENDING_FALLBACK);
+
+    const done = root && (visible(root.querySelector('.w-form-done')) || visible(root.querySelector('.w-form-fail')));
+    const formHidden = !visible(form);
+    const valueRestored = valueChanged && real.value === origValue;
+    if (done || formHidden || valueRestored || elapsed > 20000) finish();
+  }, 100);
+  // Show it immediately rather than waiting for the first tick.
+  setBtnStatus(btn, FORM_SENDING_FALLBACK);
+}
+
+function initFormSendingState() {
+  // Capture phase: runs before Webflow's own submit handler. 'submit' only
+  // fires once native validation has passed, so invalid attempts never flip
+  // the button into its sending state.
+  document.addEventListener('submit', (e) => {
+    const form = e.target;
+    if (form && form.querySelector && form.querySelector('.submit-button__wrap .btn')) {
+      watchFormSending(form);
+    }
+  }, true);
+}
+
+// b127 — preload the Home hero video when the visit starts on a page that
+// isn't Home. The persistent bunny player only exists in Home's HTML, so a
+// visit starting elsewhere had nothing to hand over: going Home meant
+// initialising the player and fetching the video from scratch. Instead, once
+// the landing page has fully loaded and the browser is idle (plus a short
+// extra delay, and a low fetch priority), fetch Home's HTML, lift out its
+// persistent player(s), initialise them inside the park host, and register
+// them in parkedBunnyPlayers — exactly where a Home -> elsewhere visit would
+// have left them. The existing reclaim path (reparentBunnyPlayers /
+// reclaimParkedBunnyPlayer) then drops the already-buffering video into the
+// hero slot when the user navigates Home. Everything is skipped on Home
+// itself, on Save-Data / 2g connections, and if no HLS playback is possible.
+let homeHeroPreloadStarted = false;
+
+function preloadHomeHeroVideo() {
+  if (homeHeroPreloadStarted) return;
+  // On Home (or any page that already has a persistent player) — nothing to do.
+  if (document.querySelector('[data-bunny-persist="true"]') || parkedBunnyPlayers.size) return;
+  const conn = navigator.connection;
+  if (conn && (conn.saveData || /(^|-)2g$/.test(conn.effectiveType || ''))) return;
+  const probe = document.createElement('video');
+  const canHls = !!(window.Hls && window.Hls.isSupported && window.Hls.isSupported()) ||
+    !!probe.canPlayType('application/vnd.apple.mpegurl');
+  if (!canHls) return;
+  homeHeroPreloadStarted = true;
+
+  fetch('/', { credentials: 'same-origin', priority: 'low' })
+    .then(r => (r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status))))
+    .then(html => {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      doc.querySelectorAll('[data-bunny-persist="true"][data-bunny-background-init][data-bunny-id]').forEach(src => {
+        const id = src.getAttribute('data-bunny-id');
+        // The user may have reached Home (or something else holding this id)
+        // while the fetch was in flight — then Home inits its own, leave it.
+        if (document.querySelector('[data-bunny-id="' + id + '"]') || parkedBunnyPlayers.has(id)) return;
+
+        const player = document.importNode(src, true);
+        // Lazy mode would wait for the player to scroll into view; here we
+        // want it to start buffering now.
+        player.setAttribute('data-player-lazy', 'false');
+        // Own wrapper, so initBunnyPlayerBackground's scope never touches
+        // other players already sitting in the park host.
+        const holder = document.createElement('div');
+        holder.appendChild(player);
+        getBunnyParkHost().appendChild(holder);
+
+        initBunnyPlayerBackground(holder);
+        // Buffer only — don't play (or keep decoding) while it's parked
+        // behind another page. Disconnecting before the observer's first
+        // callback fires stops its autoplay; reclaim restarts playback.
+        if (player._io) { try { player._io.disconnect(); } catch (_) {} player._io = null; }
+        const video = player.querySelector('video');
+        try { if (video) video.pause(); } catch (_) {}
+
+        parkedBunnyPlayers.set(id, player);
+      });
+    })
+    .catch(err => {
+      homeHeroPreloadStarted = false;
+    });
+}
+
+// Secondary to the landing page: wait for full load, then idle, then a beat.
+function schedulePreloadHomeHeroVideo() {
+  const start = () => {
+    const run = () => setTimeout(preloadHomeHeroVideo, 1500);
+    if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 4000 });
+    else run();
+  };
+  if (document.readyState === 'complete') start();
+  else window.addEventListener('load', start, { once: true });
+}
+
 function initOnceFunctions() {
   initLenis();
   if (onceFunctionsInitialized) return;
   onceFunctionsInitialized = true;
+
+  // b121 — floating form labels (CTA form). Delegated on document, bound
+  // once, so it keeps working on every Barba-swapped container with no
+  // per-page re-init (the old jQuery $(".field").on(...) only bound to
+  // fields present at first load, so it died after a page change).
+  initFormFieldLabels();
+  initFormSubmitMirror();
+  initFormSendingState();
 
   // Nav and grid overlay live outside the Barba container, so check
   // document directly and only set them up once.
   if (document.querySelector('[data-navigation-toggle="toggle"]')) {
     initFullScreenNavigation();
   }
+
+  initMenuButtonHover();
 
   if (document.querySelector('[data-animated-grid]')) {
     initAnimatedGrid();
@@ -238,6 +421,73 @@ function initOnceFunctions() {
   }
 }
 
+// b137 — menu button label rolls up on hover, same mechanic as the .btn text
+// (see buildRollPairs / initButtonHoverFocus): the label slides up out of a
+// clipped wrapper while an identical clone rises into place from below.
+// The label itself is left untouched (Home's intro SplitText and the nav
+// timeline's autoAlpha both act on it), so the clone is a sibling: it's
+// aria-hidden, takes the label's classes (same type), and mirrors its live
+// colour while a roll is active so colour-zone tints still apply.
+function initMenuButtonHover() {
+  const navEl = document.querySelector('[data-navigation-status]');
+  const button = document.querySelector('.nav__button');
+  const label = button ? button.querySelector('.nav__button-label') : null;
+  if (!navEl || !button || !label || !label.parentNode || label._rollBound) return;
+  label._rollBound = true;
+
+  const wrap = document.createElement('span');
+  wrap.style.cssText = 'display:inline-block;overflow:hidden;position:relative;vertical-align:top;';
+  label.parentNode.insertBefore(wrap, label);
+  wrap.appendChild(label);
+
+  const clone = document.createElement('span');
+  clone.className = label.className;
+  clone.setAttribute('aria-hidden', 'true');
+  clone.textContent = (label.textContent || '').trim();
+  clone.style.cssText += ';position:absolute;top:0;left:0;width:100%;pointer-events:none;transition:none;';
+  wrap.appendChild(clone);
+  gsap.set(clone, { yPercent: 100, autoAlpha: 1 });
+
+  const syncColor = () => { clone.style.color = getComputedStyle(label).color; };
+  let syncing = false;
+  const startSync = () => { if (!syncing) { syncing = true; gsap.ticker.add(syncColor); } };
+  const stopSync = () => { if (syncing) { syncing = false; gsap.ticker.remove(syncColor); } };
+  syncColor();
+
+  // b138 — overwrite:'auto' (not true) and a property-scoped kill below:
+  // overwrite:true / killTweensOf(label) also destroyed navTimeline's own
+  // autoAlpha tween on the label, so the menu text stopped fading out when
+  // the menu opened.
+  const ROLL = { duration: 0.65, ease: 'osmo', overwrite: 'auto' };
+  const isOpen = () => navEl.getAttribute('data-navigation-status') === 'active';
+
+  const rollIn = () => {
+    if (isOpen()) return;
+    startSync();
+    gsap.to(label, { yPercent: -100, ...ROLL });
+    gsap.to(clone, { yPercent: 0, ...ROLL });
+  };
+  const rollOut = (instant) => {
+    if (instant) {
+      gsap.killTweensOf([label, clone], 'yPercent');
+      gsap.set(label, { yPercent: 0 });
+      gsap.set(clone, { yPercent: 100 });
+      stopSync();
+      return;
+    }
+    gsap.to(label, { yPercent: 0, ...ROLL });
+    gsap.to(clone, { yPercent: 100, ...ROLL, onComplete: stopSync });
+  };
+
+  button.addEventListener('mouseenter', rollIn);
+  button.addEventListener('mouseleave', () => rollOut(false));
+  button.addEventListener('focus', rollIn);
+  button.addEventListener('blur', () => rollOut(false));
+  // Opening/closing the menu: put the label back at once so the nav
+  // timeline's own fade of the label never shows the clone.
+  button.addEventListener('click', () => rollOut(true));
+}
+
 function initBeforeEnterFunctions(next) {
   nextPage = next || document;
 
@@ -246,28 +496,49 @@ function initBeforeEnterFunctions(next) {
 }
 
 // .nav__logo / .nav__button-label live in the persistent Global component
-// (outside the Barba container), so they're the exact same DOM nodes
-// across every page. initColorZones() tweens their `color` inline as you
-// scroll through a page's own colored sections — but it only runs on a
-// page that actually has [data-color-zone] sections, so navigating to a
-// page without them (e.g. Orchards → Home, if Home has none) left that
-// inline color from the previous page stuck on the nav forever, since
-// nothing ever cleared it.
-//
-// Originally this reset ran in initAfterEnterFunctions (barba.hooks.
-// afterEnter), which only fires once the enter animation's whole promise
-// resolves — well after the incoming page is already visible. That meant
-// the nav would render in its stale, wrong color the instant the page
-// faded in, then visibly snap to correct a beat later: a brown-then-white
-// flash instead of no flash at all. Calling this from the leave timeline's
-// onComplete instead — the same moment reparentBunnyPlayers/current.remove()
-// already run, screen still fully covered by the transition panel — means
-// the nav is already correct before anyone can see it.
+// (outside the Barba container), so they're the same DOM nodes across
+// every page. initColorZones() tweens their `color` inline while
+// scrolling a page's own colored sections, but only runs on pages that
+// have [data-color-zone] sections — so navigating to a page without any
+// left the previous page's inline color stuck on the nav. Called from the
+// leave timeline's onComplete (screen still covered) rather than
+// barba.hooks.afterEnter (page already visible), so the nav is already
+// correct before the incoming page is shown — no color flash.
+// b141 — [data-color-zone-target] can be the Barba container element ITSELF
+// (Our Approach: <main data-barba="container" data-color-zone-target>).
+// querySelector only searches descendants, so it never found it and the nav
+// colour override was silently never applied (it only ever looked right by
+// accident, via a tint carried over from the previous page).
+function findColorZoneTarget(scope) {
+  if (!scope) return null;
+  if (scope.matches && scope.matches('[data-color-zone-target]')) return scope;
+  return scope.querySelector('[data-color-zone-target]');
+}
+
+function applyNavDefaultColor(scope) {
+  const target = findColorZoneTarget(scope);
+  const key = target ? target.getAttribute('data-nav-default-color') : null;
+  const color = key ? COLORS[key] : null;
+  if (!color) return;
+  const navTargets = [document.querySelector('.nav__logo'), document.querySelector('.nav__button-label')].filter(Boolean);
+  if (navTargets.length) gsap.set(navTargets, { color });
+}
+
 function resetPersistentNavColor(next) {
   const navLogoEl = document.querySelector('.nav__logo');
   const menuLabelEl = document.querySelector('.nav__button-label');
   const navTargets = [navLogoEl, menuLabelEl].filter(Boolean);
   if (!navTargets.length) return;
+
+  // b140 — kill the OUTGOING page's colour-zone triggers and any in-flight
+  // colour tween on the nav BEFORE clearing. gsap.set(clearProps) doesn't stop
+  // a running tween, and the old page's zone triggers (revertToDefault /
+  // setZone) can still fire as scroll resets to 0 — either re-applied the
+  // old page's tint (light green) right after it was cleared, so Home came
+  // back with the wrong nav colour.
+  colorZoneSTs.forEach(st => st.kill());
+  colorZoneSTs = [];
+  gsap.killTweensOf(navTargets, 'color');
 
   gsap.set(navTargets, { clearProps: 'color' });
 
@@ -276,7 +547,7 @@ function resetPersistentNavColor(next) {
   // too, from the incoming container directly (already in the DOM by
   // this point, just not yet visible) rather than waiting for
   // initColorZones to run later in afterEnter.
-  const target = next ? next.querySelector('[data-color-zone-target]') : null;
+  const target = findColorZoneTarget(next);
   const overrideKey = target ? target.getAttribute('data-nav-default-color') : null;
   const override = overrideKey ? COLORS[overrideKey] : null;
   if (override) {
@@ -284,24 +555,92 @@ function resetPersistentNavColor(next) {
   }
 }
 
+// -----------------------------------------
+// WEBFLOW SPA FORMS + TURNSTILE RESET
+// -----------------------------------------
+// b124 — Webflow's form JS and Cloudflare Turnstile only initialise on a full
+// page load. After a Barba swap the new page's submit button stays locked
+// (w-form-loading / disabled), no AJAX handler is bound (submit falls through
+// to a native GET), and the Turnstile token is stale/missing. Re-initialise
+// Webflow's forms and re-render Turnstile after every transition (Ross
+// Anderson's fix). Needs Turnstile enabled in Site Settings -> Apps &
+// Integrations -> Form integrations, plus a hidden Webflow form in the global
+// structure so the Turnstile runtime loads on pages with no form of their own.
+let webflowFormsFirstLoad = true;
+
+function initWebflowForms() {
+  // First load is a real page load — Webflow already initialised everything.
+  if (webflowFormsFirstLoad) {
+    webflowFormsFirstLoad = false;
+    return;
+  }
+  requestAnimationFrame(() => {
+    resetWebflowForms();
+    resetTurnstile();
+  });
+}
+
+function resetWebflowForms() {
+  const w = window.Webflow;
+  if (!w) return;
+  w.destroy();
+  w.ready();
+  if (w.require) {
+    const forms = w.require("forms");
+    if (forms && forms.preview) forms.preview();
+  }
+  document.querySelectorAll(".w-form").forEach((wrapper) => {
+    wrapper.classList.remove("w-form-loading");
+    wrapper.querySelectorAll('[type="submit"]').forEach((btn) => {
+      btn.classList.remove("w-form-loading");
+      btn.removeAttribute("disabled");
+    });
+  });
+}
+
+function resetTurnstile() {
+  if (!window.turnstile) return;
+  document.querySelectorAll(".w-form form").forEach((form) => {
+    const sitekey = form.getAttribute("data-turnstile-sitekey");
+    if (!sitekey) return;
+    form.querySelectorAll('[id^="cf-chl-widget"]').forEach((el) => el.remove());
+    form.querySelectorAll(".cf-turnstile").forEach((el) => el.remove());
+    const container = document.createElement("div");
+    form.appendChild(container);
+    window.turnstile.render(container, { sitekey });
+  });
+}
+
 function initAfterEnterFunctions(next) {
   nextPage = next || document;
 
-  // Runs after enter animation completes
+  initWebflowForms(); // b124 — see WEBFLOW SPA FORMS + TURNSTILE RESET above
+
+  // Runs after enter animation completes.
   //
   // [data-line-reveal] and .text-display-large/medium are handled earlier
-  // now — prepared (SplitText + hidden) from the leave timeline's
-  // onComplete and activated (ScrollTriggers created) at the enter
-  // timeline's "startEnter" label — see prepareLineReveal/activateLineReveal
-  // and prepareDisplayLargeReveal/activateDisplayLargeReveal. Left out of
-  // this function entirely for a real transition; runPageOnceAnimation
-  // calls both halves together for the true first load, which has no
-  // covered window to prepare behind.
+  // and intentionally left out here — prepared from the leave timeline's
+  // onComplete, activated at the enter timeline's "startEnter" label. See
+  // prepareLineReveal/activateLineReveal and prepareDisplayLargeReveal/
+  // activateDisplayLargeReveal. runPageOnceAnimation calls both halves
+  // together for the true first load, which has no covered window to
+  // prepare behind.
   if (has('[data-bunny-background-init]')) initBunnyPlayerBackground(nextPage);
   if (has('[data-parallax="trigger"]')) initGlobalParallax(nextPage);
   if (has('.section__about')) initHeroAboutParallax(nextPage);
   if (has('.btn')) initButtonHoverFocus(nextPage);
+  // b122 — new page's fields may be autofilled; re-sync their labels.
+  if (has('.field')) syncFormFieldLabelsSoon(nextPage);
+  // b133 — apply a page's data-nav-default-color even when the page has no
+  // [data-color-zone] sections. initColorZones (below) is the only other
+  // place that applied it, and it's skipped on zone-less pages like Our
+  // Approach — so on a hard refresh the logo/menu label stayed the CSS
+  // default (white); only a Barba navigation (resetPersistentNavColor) got it.
+  applyNavDefaultColor(nextPage);
   if (has('[data-color-zone]')) initColorZones(nextPage);
+  // See PARALLAX IMAGE SLIDER (Smooothy) section for why this needs its
+  // own destroy-then-rebuild, not just a plain init.
+  if (has('[data-parallax-init]')) initParallaxImageSlider(nextPage);
 
 
   if(hasLenis){
@@ -332,8 +671,24 @@ function runPageOnceAnimation(next) {
     // together, same as a real transition's two halves normally split
     // across leave's onComplete and enter's "startEnter".
     playLoadReveal(prepareLoadReveal(next));
-    activateLineReveal(prepareLineReveal(next));
-    activateDisplayLargeReveal(prepareDisplayLargeReveal(next));
+    // prepareDisplayLargeReveal must run before prepareLineReveal: it
+    // populates heroTitleGroups (see that map's own comment), which
+    // prepareLineReveal reads to tag the hero's own intro paragraph so
+    // activateDisplayLargeReveal fires it together with the title instead
+    // of activateLineReveal giving it its own trigger.
+    const displayLargePrepared = prepareDisplayLargeReveal(next);
+    const linePrepared = prepareLineReveal(next);
+    activateLineReveal(linePrepared);
+    activateDisplayLargeReveal(displayLargePrepared, linePrepared);
+    activateStickerReveal(prepareStickerReveal(next));
+    activateImageReveal(prepareImageReveal(next));
+    activateRuleReveal(prepareRuleReveal(next));
+    // An above-the-fold ScrollTrigger (the hero title, since "top 90%" is
+    // already past at scroll 0) can be created with a stale start position
+    // and never fire its once:true onEnter — refreshing right after
+    // creation corrects it. Below-the-fold reveals aren't affected; they
+    // fire normally as the user scrolls to them.
+    if (hasScrollTrigger) ScrollTrigger.refresh();
   }, null, 0);
 
   return tl;
@@ -348,30 +703,74 @@ function runPageOnceAnimation(next) {
 let pendingLoadReveal = null;
 let pendingLineReveals = null;
 let pendingDisplayLargeReveals = null;
+// See prepareStickerReveal/activateStickerReveal.
+let pendingStickerReveals = null;
+// b117 — see prepareImageReveal/activateImageReveal.
+let pendingImageReveals = null;
+// b143 — see prepareRuleReveal/activateRuleReveal.
+let pendingRuleReveals = null;
+
+// The hero's own intro paragraph is synced to fire in the exact same
+// onEnter callback as its title's reveal (see activateDisplayLargeReveal),
+// rather than getting its own independent ScrollTrigger — two separately
+// created triggers aren't guaranteed to fire on the same tick, and this
+// way the paragraph's duration can also be derived from the title tween's
+// real GSAP-reported duration instead of a hand-recomputed formula.
+//
+// Populated by prepareDisplayLargeReveal (always called before
+// prepareLineReveal — see the call sites in runPageOnceAnimation and
+// runPageLeaveAnimation's onComplete): each hero section's title group,
+// keyed by the .section__hero__content element it belongs to, plus that
+// group's introWrap (the true intro block — see prepareDisplayLargeReveal's
+// own comment for why that scoping matters). prepareLineReveal reads this
+// to decide whether a given [data-line-reveal] element is the hero's own
+// intro paragraph and should be tagged for activateDisplayLargeReveal to
+// fire, instead of getting its own trigger from activateLineReveal.
+let heroTitleGroups = new Map();
+
+// b129 — simple fade transition (see runPageLeaveAnimation).
+const TRANSITION_FADE_OUT = 0.5;
+const TRANSITION_FADE_IN = 0.6;
+const TRANSITION_BG_DURATION = 0.9;
+let pageBaseBg = null;
+let transitionNextBg = null;
+
+// A container's own background colour, or the body's default when the
+// container is transparent.
+function getContainerBg(el) {
+  const c = getComputedStyle(el).backgroundColor;
+  if (!c || c === 'transparent' || /,\s*0\)$/.test(c)) return pageBaseBg;
+  return c;
+}
 
 function runPageLeaveAnimation(current, next) {
-  const transitionWrap = document.querySelector("[data-transition-wrap]");
-  const transitionPanel = transitionWrap.querySelector("[data-transition-panel]");
-  const transitionPanelTop = transitionWrap.querySelector("[data-transition-panel-top]");
-  const transitionPanelBottom = transitionWrap.querySelector("[data-transition-panel-bottom]");
-  const transitionLogo = transitionWrap.querySelector("[data-transition-logo]");
+  // navWasOpenForTransition is decided in barba.hooks.before (b144), which
+  // always runs first, so every hook agrees on it.
+  leaveDone = false;
 
   const tl = gsap.timeline({
     onComplete: () => {
       // Screen is fully covered by the transition panel at this point —
       // safe to hand off/park any persistent bunny players without the
       // user seeing them move.
-      bunnyLog('leave timeline onComplete fired — shutter should be fully closed now');
       reparentBunnyPlayers(current, next);
-      // b81 — nav is only actually closed here, now that the panel has
-      // covered the screen (see barba.hooks.before's comment for why).
-      // If the user navigated via a link/CTA that isn't the nav menu at
-      // all, the menu was never open and this is a harmless no-op
-      // (navTimeline pausing at/staying at 0).
-      closeNavForTransition();
-      navDebugSnapshot('leave.onComplete: before resetPersistentNavColor');
-      resetPersistentNavColor(next);
-      navDebugSnapshot('leave.onComplete: after resetPersistentNavColor');
+      // Nav is only actually closed here, now that the panel has covered
+      // the screen (see barba.hooks.before's comment for why). If the user
+      // navigated via a link/CTA that isn't the nav menu, the menu was
+      // never open and this is a harmless no-op.
+      // b131 — with the menu open, closing + nav colour reset are deferred to
+      // the enter (animated close); see runPageEnterAnimation.
+      if (!navWasOpenForTransition) {
+        closeNavForTransition();
+        resetPersistentNavColor(next);
+      }
+      // Tear down the outgoing page's Smooothy instance(s) (ticker
+      // callback + its own drag/resize listeners) before `current.remove()`
+      // below detaches its DOM — see destroyParallaxImageSliders' comment.
+      try {
+        destroyParallaxImageSliders();
+      } catch (err) {
+      }
       // Prepared here (hidden state only) while still covered; actually
       // played/activated later from runPageEnterAnimation's "startEnter"
       // label. Each guarded independently — one throwing (e.g. a stale
@@ -379,28 +778,48 @@ function runPageLeaveAnimation(current, next) {
       // or everything after it silently never gets its hidden/prepared
       // state and stays invisible for good.
       try {
-        pendingLoadReveal = prepareLoadReveal(next);
+        pendingLoadReveal = prepareLoadReveal(next, { chrome: false });
       } catch (err) {
-        bunnyLog('prepareLoadReveal threw — continuing anyway:', err && err.message);
         pendingLoadReveal = null;
       }
-      navDebugSnapshot('leave.onComplete: after prepareLoadReveal');
-      try {
-        pendingLineReveals = prepareLineReveal(next);
-      } catch (err) {
-        bunnyLog('prepareLineReveal threw — continuing anyway:', err && err.message);
-        pendingLineReveals = null;
-      }
-      navDebugSnapshot('leave.onComplete: after prepareLineReveal');
+      // prepareDisplayLargeReveal must run before prepareLineReveal: it
+      // populates heroTitleGroups, which prepareLineReveal reads to tag
+      // the hero's own intro paragraph for activateDisplayLargeReveal to
+      // fire directly.
       try {
         pendingDisplayLargeReveals = prepareDisplayLargeReveal(next);
       } catch (err) {
-        bunnyLog('prepareDisplayLargeReveal threw — continuing anyway:', err && err.message);
         pendingDisplayLargeReveals = null;
+        heroTitleGroups = new Map();
       }
-      navDebugSnapshot('leave.onComplete: after prepareDisplayLargeReveal');
+      try {
+        pendingLineReveals = prepareLineReveal(next);
+      } catch (err) {
+        pendingLineReveals = null;
+      }
+      // Same prepare/activate split as the other reveals: hidden state set
+      // up now while still covered, ScrollTriggers created later from
+      // "pageReady" so a sticker above the fold pops in right as it
+      // appears rather than sitting fully visible for a beat first.
+      try {
+        pendingStickerReveals = prepareStickerReveal(next);
+      } catch (err) {
+        pendingStickerReveals = null;
+      }
+      // b117 — see prepareImageReveal/activateImageReveal.
+      try {
+        pendingImageReveals = prepareImageReveal(next);
+      } catch (err) {
+        pendingImageReveals = null;
+      }
+      // b143 — horizontal rules draw in from 0 width.
+      try {
+        pendingRuleReveals = prepareRuleReveal(next);
+      } catch (err) {
+        pendingRuleReveals = null;
+      }
       current.remove();
-      navDebugSnapshot('leave.onComplete: after current.remove()');
+      leaveDone = true;
     }
   });
 
@@ -409,66 +828,59 @@ function runPageLeaveAnimation(current, next) {
     return tl.set(current, { autoAlpha: 0 });
   }
 
-  tl.set(transitionPanel, {
-    autoAlpha: 1
-  }, 0);
+  // b129 — page transition simplified: no shutter panel/logo. The outgoing
+  // page's content just fades out, then the incoming page fades in. If the
+  // two pages have different background colours (the colour lives on the
+  // [data-barba="container"] itself, e.g. Our Approach's green), the body
+  // behind them tweens from the old colour to the new one so the colour
+  // change animates instead of snapping.
+  if (pageBaseBg === null) pageBaseBg = getComputedStyle(document.body).backgroundColor;
+  const fromBg = getContainerBg(current);
+  const toBg = getContainerBg(next);
+  // Move each container's own bg onto the body for the duration, so fading
+  // a container's content doesn't also fade its colour to the body's default.
+  gsap.set(document.body, { backgroundColor: fromBg });
+  gsap.set(current, { backgroundColor: 'transparent' });
+  gsap.set(next, { backgroundColor: 'transparent' });
+  if (navWasOpenForTransition) {
+    // Menu is covering the page — swap colour/content instantly behind it.
+    gsap.set(document.body, { backgroundColor: toBg });
+  } else {
+    gsap.to(document.body, { backgroundColor: toBg, duration: TRANSITION_BG_DURATION, ease: 'power2.inOut', overwrite: 'auto' });
+  }
+  transitionNextBg = toBg;
 
-  tl.set(transitionPanelTop, {
-    scaleY: 0,
-    height: "15vw"
-  }, 0);
-
-  tl.set(transitionPanelBottom, {
-    scaleY: 1,
-    height: "20vw"
-  }, 0);
-
-  // Logo: fade + small rise + bouncy scale pop, as one unit.
-  tl.set(transitionLogo, {
-    autoAlpha: 0,
-    y: 16,
-    scale: 0.7
-  }, 0);
-
-  tl.set(next,{
+  tl.set(next, {
     autoAlpha: 0
   }, 0);
 
-  tl.fromTo(transitionPanel,{
-    yPercent: 0
-  },{
-    yPercent: -100,
-    duration: 1,
-  }, 0);
-
-  tl.fromTo(transitionPanelTop,{
-    scaleY: 0
-  },{
-    scaleY: 1,
-    duration: 1,
-  }, "<");
-
-  tl.to(transitionLogo, {
-    autoAlpha: 1,
-    y: 0,
-    scale: 1,
-    duration: 0.7,
-    ease: "back.out(1.7)"
-  }, "<+=0.4");
-
-  tl.fromTo(current,{
-    y: "0vh"
-  },{
-    y: "-15dvh",
-    duration: 1,
-  }, 0);
+  if (navWasOpenForTransition) {
+    tl.set(current, { opacity: 0 }, 0);
+  } else {
+    tl.to(current, {
+      opacity: 0,
+      duration: TRANSITION_FADE_OUT,
+      ease: 'power1.out'
+    }, 0);
+  }
 }
 
-function runPageEnterAnimation(next){
-  const transitionWrap = document.querySelector("[data-transition-wrap]");
-  const transitionPanel = transitionWrap.querySelector("[data-transition-panel]");
-  const transitionPanelBottom = transitionWrap.querySelector("[data-transition-panel-bottom]");
-  const transitionLogo = transitionWrap.querySelector("[data-transition-logo]");
+async function runPageEnterAnimation(next){
+
+  // b131 — menu was open: wait for the leave's swap, then animate the menu
+  // closed (page behind it is already the new one, still hidden), and only
+  // then fade the new page in and run its reveals.
+  if (navWasOpenForTransition) {
+    await new Promise(r => { const t = () => (leaveDone ? r() : setTimeout(t, 16)); t(); });
+    await closeNavAnimated();
+    closeNavForTransition();
+    resetPersistentNavColor(next);
+    if (pendingNavUpdateData) {
+      initBarbaNavUpdate(pendingNavUpdateData);
+      updateNavRestingColors();
+      pendingNavUpdateData = null;
+    }
+  }
 
   const tl = gsap.timeline();
 
@@ -483,76 +895,54 @@ function runPageEnterAnimation(next){
       if (logo) gsap.set(logo, { autoAlpha: 1, y: 0, scale: 1 });
       pendingLoadReveal = null;
     }
-    (pendingLineReveals || []).forEach(({ split }) => gsap.set(split.lines, { yPercent: 0 }));
+    // b115 — matches prepareLineReveal's new resting state (opacity/y/filter),
+    // not the old yPercent-only mask reset.
+    (pendingLineReveals || []).forEach(({ split, unit }) => gsap.set(split ? split.lines : unit, { opacity: 1, y: 0 }));
     pendingLineReveals = null;
-    (pendingDisplayLargeReveals || []).forEach(({ split }) => gsap.set(split.chars, { autoAlpha: 1, yPercent: 0, rotateY: 0 }));
+    // b113 — lines, not words, now that DISPLAY_LARGE_ANIM splits by line.
+    (pendingDisplayLargeReveals || []).forEach(({ splits }) => splits.forEach(split => gsap.set(split.lines, { opacity: 1, y: 0 })));
     pendingDisplayLargeReveals = null;
+    // b120 — matches prepareStickerReveal's new resting state (opacity/y/filter,
+    // not the old autoAlpha/y/scale bounce-pop).
+    (pendingStickerReveals || []).forEach(({ el }) => gsap.set(el, { opacity: 1, y: 0 }));
+    pendingStickerReveals = null;
+    // b117/b118 — matches prepareImageReveal's resting state (scale is no
+    // longer part of this reveal — it's driven continuously by
+    // initGlobalParallax's own scrubbed tween instead, untouched here).
+    (pendingImageReveals || []).forEach(({ el }) => gsap.set(el, { opacity: 1, y: 0 }));
+    pendingImageReveals = null;
+    (pendingRuleReveals || []).forEach(el => gsap.set(el, { scaleX: 1 }));
+    pendingRuleReveals = null;
     tl.set(next, { autoAlpha: 1 });
     tl.add("pageReady")
     tl.call(resetPage, [next], "pageReady");
     return new Promise(resolve => tl.call(resolve, null, "pageReady"));
   }
 
-  // Hold so the bouncy logo has a beat to land before the reveal begins.
-  tl.add("startEnter", 1.8);
+  // b129 — fade only: wait for the outgoing fade to finish (it also runs
+  // the prepare step in its onComplete), then fade the new page in.
+  tl.add("startEnter", navWasOpenForTransition ? 0.05 : TRANSITION_FADE_OUT + 0.05);
 
   tl.call(() => {
-    bunnyLog('enter timeline reaches startEnter — next page about to fade in (autoAlpha:1)');
     // Play the hero intro (prepared earlier, hidden, in the leave
-    // timeline's onComplete) right as the page becomes visible, so the
-    // roll-in is what's actually seen, not something already finished.
-    // This one is safe to run here: it only drives immediate .to() tweens,
-    // not ScrollTrigger, so it doesn't care that `next` is still
-    // position:fixed at this point.
-    // Guarded: a throw in here must not stop the rest of this GSAP
-    // timeline (transitionPanel/logo tweens, and the later "pageReady"
-    // scroll-reveal activation) from running.
+    // timeline's onComplete) right as the page becomes visible.
     try {
       playLoadReveal(pendingLoadReveal);
     } catch (err) {
-      bunnyLog('playLoadReveal threw — continuing anyway:', err && err.message);
     }
     pendingLoadReveal = null;
   }, null, "startEnter");
 
-  tl.set(next, {
+  tl.fromTo(next, { autoAlpha: 0 }, {
     autoAlpha: 1,
-  }, "startEnter");
-
-  tl.fromTo(transitionPanel, {
-    yPercent: -100,
-  },{
-    yPercent: -200,
-    duration: 1,
-    overwrite: "auto",
+    duration: TRANSITION_FADE_IN,
+    ease: 'power1.inOut',
     immediateRender: false
   }, "startEnter");
 
-  tl.fromTo(transitionPanelBottom,{
-    scaleY: 1
-  },{
-    scaleY: 0,
-    duration: 1,
-  }, "<");
-
-  tl.set(transitionPanel, {
-    autoAlpha: 0
-  }, ">");
-
-  tl.to(transitionLogo, {
-    autoAlpha: 0,
-    y: -16,
-    scale: 0.7,
-    duration: 0.5,
-    ease: "back.in(1.7)"
-  }, "startEnter-=0.2");
-
-  tl.from(next, {
-    y: "25dvh",
-    duration: 1,
-  }, "startEnter");
-
-  tl.add("pageReady");
+  // Scroll reveals activate shortly after the fade begins so headings
+  // animate in as the page appears.
+  tl.add("pageReady", "startEnter+=0.15");
   tl.call(resetPage, [next], "pageReady");
   // Scroll-triggered heading reveals have to wait until here: resetPage()
   // just cleared the position:fixed/top/left/right/bottom that
@@ -566,20 +956,54 @@ function runPageEnterAnimation(next){
   // visible flash — it just means the reveal begins slightly after the
   // page appears rather than in the same instant.
   tl.call(() => {
-    bunnyLog('enter timeline reaches pageReady — activating scroll reveals, pendingLineReveals=', pendingLineReveals ? pendingLineReveals.length : pendingLineReveals, 'pendingDisplayLargeReveals=', pendingDisplayLargeReveals ? pendingDisplayLargeReveals.length : pendingDisplayLargeReveals);
+    // Keep a reference before it's nulled out below: activateDisplayLargeReveal
+    // needs it too, to fire the hero's own intro paragraph in the same
+    // callback as the title (see both functions' own comments).
+    const linePreparedForHero = pendingLineReveals;
     try {
       activateLineReveal(pendingLineReveals);
     } catch (err) {
-      bunnyLog('activateLineReveal threw — continuing anyway:', err && err.message);
     }
     pendingLineReveals = null;
     try {
-      activateDisplayLargeReveal(pendingDisplayLargeReveals);
+      activateDisplayLargeReveal(pendingDisplayLargeReveals, linePreparedForHero);
     } catch (err) {
-      bunnyLog('activateDisplayLargeReveal threw — continuing anyway:', err && err.message);
     }
     pendingDisplayLargeReveals = null;
+    try {
+      activateStickerReveal(pendingStickerReveals);
+    } catch (err) {
+    }
+    pendingStickerReveals = null;
+    try {
+      activateImageReveal(pendingImageReveals);
+    } catch (err) {
+    }
+    pendingImageReveals = null;
+    try {
+      activateRuleReveal(pendingRuleReveals);
+    } catch (err) {
+    }
+    pendingRuleReveals = null;
+    // An above-the-fold ScrollTrigger created just above (the hero title
+    // especially, since its "top 90%" start point is already behind us at
+    // scroll 0) can come out with a stale start position computed against
+    // layout that predates this navigation, and never fire its once:true
+    // onEnter. Refreshing right after creation corrects it — hooks.
+    // afterEnter (below) also refreshes, but only once this timeline's
+    // promise has resolved, which is a cycle too late for a trigger that
+    // needed firing immediately. Below-the-fold reveals aren't affected;
+    // they fire normally as the user scrolls to them.
+    if (hasScrollTrigger) ScrollTrigger.refresh();
   }, null, "pageReady");
+
+  // Hand the colours back to the page itself once both the fade and the
+  // body's colour tween have finished (visually identical: body already
+  // equals the new page's colour by then).
+  tl.call(() => {
+    gsap.set(next, { clearProps: 'backgroundColor' });
+    gsap.set(document.body, { clearProps: 'backgroundColor' });
+  }, null, "startEnter+=" + Math.max(TRANSITION_FADE_IN, TRANSITION_BG_DURATION));
 
   return new Promise(resolve => {
     tl.call(resolve, null, "pageReady");
@@ -594,33 +1018,25 @@ function runPageEnterAnimation(next){
 document.addEventListener('DOMContentLoaded', function () {
 
 barba.hooks.before(data => {
-  // b81: leave the open menu visually in place through the leave
-  // transition (data-navigation-status stays 'active', navTimeline and
-  // the nav-char transforms untouched) instead of snapping it shut
-  // instantly here. Closing it immediately — the old behavior — exposed
-  // the outgoing page underneath for however long the transition panel
-  // took to slide in and cover the screen, seen as a flash of the page's
-  // own background between "menu just closed" and "panel has caught up".
-  // The actual close (see closeNavForTransition, called from the leave
-  // timeline's onComplete below) now happens only once the panel has
-  // actually finished covering, so nothing underneath is ever exposed.
+  // b144 — decided once, up front, before anything else touches the nav.
+  const navStatusAtStart = document.querySelector('[data-navigation-status]');
+  navWasOpenForTransition = !reducedMotion && !!navStatusAtStart && navStatusAtStart.getAttribute('data-navigation-status') === 'active';
+  pendingNavUpdateData = null;
+  // Leave the open menu visually in place through the leave transition
+  // (data-navigation-status stays 'active', navTimeline and the nav-char
+  // transforms untouched) instead of snapping it shut instantly — closing
+  // it immediately would expose the outgoing page underneath for however
+  // long the transition panel takes to cover the screen. The actual close
+  // (closeNavForTransition, called from the leave timeline's onComplete
+  // below) happens only once the panel has finished covering.
   //
-  // Pointer-events are still disabled right away, though, so nothing in
-  // the (still visually open) menu can be clicked/hovered again mid-transition.
+  // Pointer-events are still disabled right away, so nothing in the
+  // (still visually open) menu can be clicked/hovered mid-transition.
   disableNavLinkPointerEvents();
-  // b83 — also suppress the hover mouseleave's color revert for the same
-  // reason: see navigatingAway's own comment and the mouseleave listener
+  // Also suppress the hover mouseleave's color revert for the same
+  // reason — see navigatingAway's own comment and the mouseleave listener
   // in initNavLinkHoverEffects.
   navigatingAway = true;
-  navDebugSnapshot('hooks.before:start (menu left open through the leave transition)');
-  // watchNavCharMutations() removed from here (b80) — its per-frame
-  // logging during the normal open/close char animation produced a
-  // multi-MB console log with nothing new in it now that the actual
-  // "flash on first open" root cause (the stray mouseleave in the roll-
-  // hover listener) is confirmed fixed. Call it manually from the
-  // console (window.__navDebugWatch = watchNavCharMutations) if a similar
-  // mystery-mutation hunt is needed again.
-  window.__navDebugWatch = watchNavCharMutations;
 
   // Warm any persistent bunny players (data-bunny-persist="true") right
   // at the start of the transition — force playback and drop their own
@@ -692,7 +1108,6 @@ barba.hooks.afterLeave(data => {
       const el = trigger.trigger;
       return !!el && !document.contains(el);
     });
-    bunnyLog('afterLeave: killing', toKill.length, 'stale ScrollTrigger(s) —', toKill.map(t => (t.trigger && (t.trigger.className || t.trigger.tagName)) || t.vars.id || 'unnamed'));
     toKill.forEach(trigger => trigger.kill());
   }
   // Container is already removed from the DOM, but still detached —
@@ -703,14 +1118,25 @@ barba.hooks.afterLeave(data => {
 });
 
 barba.hooks.enter(data => {
-  navDebugSnapshot('hooks.enter:before initBarbaNavUpdate');
+  // b144 — with the menu open, DON'T touch the nav yet: updateNavRestingColors
+  // snaps the tile's background to the destination's resting colour (Home's
+  // yellow) instantly, while the menu is still showing. Defer both until the
+  // menu has finished closing (see runPageEnterAnimation), then apply them
+  // while it's hidden. The menu closes in its own current colours, then the
+  // page transitions in.
+  if (navWasOpenForTransition) {
+    pendingNavUpdateData = data;
+    return;
+  }
   initBarbaNavUpdate(data);
-  navDebugSnapshot('hooks.enter:after initBarbaNavUpdate');
+  // Recompute the nav's resting colors for the page we're navigating TO
+  // (location.pathname is already updated by Barba here), so they're
+  // correct before closeNavForTransition's resetAllLinks() runs shortly
+  // after, at the leave timeline's onComplete.
+  updateNavRestingColors();
 })
 
 barba.hooks.afterEnter(data => {
-  navDebugSnapshot('hooks.afterEnter:start');
-  bunnyLog('afterEnter fired — about to run initAfterEnterFunctions + ScrollTrigger.refresh(), current ScrollTrigger count', (typeof ScrollTrigger !== 'undefined' ? ScrollTrigger.getAll().length : 'n/a'));
   // Run page functions
   initAfterEnterFunctions(data.next.container);
 
@@ -726,7 +1152,7 @@ barba.hooks.afterEnter(data => {
 });
 
 barba.init({
-  debug: true, // Set to 'false' in production
+  debug: false,
   timeout: 7000,
   preventRunning: true,
   transitions: [
@@ -737,6 +1163,9 @@ barba.init({
       // First load
       async once(data) {
         initOnceFunctions();
+        // b127 — if this first page isn't Home, warm Home's hero video in the
+        // background once the page has loaded (no-op on Home).
+        schedulePreloadHomeHeroVideo();
 
         return runPageOnceAnimation(data.next.container);
       },
@@ -816,6 +1245,12 @@ function resetPage(container){
 
   if(hasLenis){
     lenis.resize();
+    // Lenis keeps its own virtual scroll position, separate from the
+    // native window.scrollTo(0,0) above — re-home it explicitly on every
+    // navigation (not just first load), or a stale non-zero reading can
+    // survive from the previous page right as this page's reveal
+    // ScrollTriggers refresh.
+    lenis.scrollTo(0, { immediate: true, force: true });
     lenis.start();
   }
 }
@@ -855,12 +1290,9 @@ function initBarbaNavUpdate(data) {
     // Class list sync
     var newClassList = next.getAttribute('class') || '';
     var oldClassList = curr.getAttribute('class') || '';
-    // Diagnostic only (b78) — confirms exactly which nodes get their class
-    // attribute swapped here (and whether it's the .nav__link itself) and
-    // whether that swap coincides with the "current link visible then
-    // flashes" symptom seen only on the first menu-open after navigation.
+    // Diagnostic only — logs which nodes get their class attribute
+    // swapped here, useful for tracing nav-link state issues.
     if (oldClassList !== newClassList) {
-      bunnyLog('initBarbaNavUpdate: class sync on', curr.tagName, '-', JSON.stringify(oldClassList), '->', JSON.stringify(newClassList));
     }
     curr.setAttribute('class', newClassList);
   });
@@ -875,54 +1307,113 @@ function initBarbaNavUpdate(data) {
 // Reusable heading reveal — tag any element with [data-line-reveal] in
 // Webflow. Values match staggertext.webflow.io's source, but once-only
 // (not repeating) rather than replaying every scroll-back.
-// Split the same way as Home's hero intro (see prepareLoadReveal/
-// playLoadReveal) and for the same reason: this used to run entirely from
-// barba.hooks.afterEnter, well after the incoming page was already
-// visible — so a heading sat fully visible as plain static text for over
-// a second, then abruptly snapped hidden and played its reveal. Splitting
-// it lets the hidden state get set up while the page is still covered
-// (prepareLineReveal, called from the leave timeline's onComplete) and
-// only creates the ScrollTriggers that actually fire the reveal once the
-// page is about to be shown (activateLineReveal, at "startEnter") — so an
-// above-the-fold heading reveals right as it appears, instead of already
-// finished or still fully visible and un-split.
+//
+// Split into prepare/activate, same as Home's hero intro (see
+// prepareLoadReveal/playLoadReveal): the hidden state is set up here while
+// the page is still covered (called from the leave timeline's onComplete),
+// and the ScrollTriggers that actually fire the reveal are only created
+// later, once the page is about to be shown (activateLineReveal, at
+// "startEnter") — so an above-the-fold heading reveals right as it
+// appears, instead of sitting visible as static text first.
 function prepareLineReveal(scope) {
   if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
 
   const targets = (scope || document).querySelectorAll('[data-line-reveal]');
   const prepared = [];
+  // b147 — INLINE [data-line-reveal] pieces (display:inline, e.g. the "Send
+  // your CV to / email link / and we'll get back to you" run on Contact,
+  // which flows as one sentence) can't be SplitText'd: SplitText wraps every
+  // line in a block-level <div>, which breaks each piece onto its own line —
+  // looks right in the Designer (no JS) but stacks on the published site.
+  // Transforms don't apply to inline boxes either. So the whole run is
+  // revealed as one unit instead: its nearest non-inline ancestor gets the
+  // same rise + fade, once, and the inline children are left untouched.
+  const inlineUnits = new Map();
   targets.forEach(el => {
-    const split = new SplitText(el, { type: "lines", mask: "lines" });
-    gsap.set(split.lines, { yPercent: 120 });
+    if (getComputedStyle(el).display === 'inline') {
+      let unit = el.parentElement;
+      while (unit && getComputedStyle(unit).display === 'inline') unit = unit.parentElement;
+      if (unit && !inlineUnits.has(unit)) {
+        inlineUnits.set(unit, el.getAttribute('data-line-reveal-start') || 'top 90%');
+      }
+      return;
+    }
+    // b115 — same treatment as the display-heading reveal now: plain
+    // rise + blur + opacity fade (DISPLAY_LARGE_ANIM), unmasked. Was
+    // yPercent 120->0 inside a `mask: "lines"` wrapper.
+    const split = new SplitText(el, { type: "lines" });
+    gsap.set(split.lines, {
+      opacity: 0,
+      y: `${DISPLAY_LARGE_ANIM.travelEm}em`,
+    });
 
     // Per-element override — e.g. footer links set data-line-reveal-start="top 100%"
     // so they trigger right as they reach the viewport, instead of the
     // page-wide default of "top 90%".
     const start = el.getAttribute('data-line-reveal-start') || 'top 90%';
-    prepared.push({ split, start, trigger: el });
+
+    // The hero's own intro paragraph ([data-line-reveal] living inside the
+    // hero's .section__hero__content) is tagged with that section here IF
+    // a title group actually claimed it (heroTitleGroups, populated moments
+    // earlier by prepareDisplayLargeReveal — see that map's own comment).
+    // A tagged entry skips getting its own ScrollTrigger below;
+    // activateDisplayLargeReveal fires it directly instead, in the same
+    // callback as the title's own reveal.
+    //
+    // Matching also requires the element to sit inside that hero's
+    // specific introWrap (the FIRST .hero__secondary__content__wrap in the
+    // section) — .section__hero__content is actually the whole page's
+    // outer wrapping section on every inner page, not something scoped to
+    // just the hero, so without this narrower check every [data-line-reveal]
+    // anywhere on the page (not just the hero's intro) would get swept in.
+    // See prepareDisplayLargeReveal's own comment for the full story.
+    const heroAncestor = el.closest('.section__hero__content');
+    const heroGroup = heroAncestor ? heroTitleGroups.get(heroAncestor) : null;
+    const heroSection = (heroGroup && heroGroup.introWrap && heroGroup.introWrap.contains(el)) ? heroAncestor : null;
+
+    prepared.push({ split, start, trigger: el, heroSection });
+  });
+  inlineUnits.forEach((start, unit) => {
+    gsap.set(unit, { opacity: 0, y: `${DISPLAY_LARGE_ANIM.travelEm}em` });
+    prepared.push({ split: null, unit, start, trigger: unit, heroSection: null });
   });
   return prepared;
 }
 
+// Still used by the synced hero-paragraph block below and the separate
+// roll-in reveal further down the file — [data-line-reveal]'s own tween
+// now uses DISPLAY_LARGE_ANIM instead (see activateLineReveal).
+const LINE_REVEAL_DURATION = 1.9;
+const LINE_REVEAL_STAGGER = 0.05;
+
 function activateLineReveal(prepared) {
-  bunnyLog('activateLineReveal: activating', (prepared || []).length, 'prepared reveal(s)');
-  (prepared || []).forEach(({ split, start, trigger }) => {
+  (prepared || []).forEach(({ split, unit, start, trigger, heroSection }) => {
+    // An entry tagged with heroSection is fired by activateDisplayLargeReveal
+    // instead (in the same callback as the title's own reveal), so it must
+    // NOT also get its own trigger here — that would double-animate it.
+    if (heroSection) return;
     ScrollTrigger.create({
       trigger: trigger,
       start: start,
       once: true,
       onEnter: () => {
-        bunnyLog('activateLineReveal: onEnter fired for', trigger.className || trigger.tagName);
+        // b147 — an inline run is revealed as one unit (see prepareLineReveal).
+        if (unit) {
+          gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, ease: DISPLAY_LARGE_ANIM.ease });
+          return;
+        }
+        // b115 — same animation as the display-heading reveal (DISPLAY_LARGE_ANIM):
+        // was yPercent 0, LINE_REVEAL_DURATION/"expo.out"/LINE_REVEAL_STAGGER.
         gsap.to(split.lines, {
-          yPercent: 0,
-          duration: 1.9,
-          ease: "expo.out",
-          stagger: { each: 0.05, from: "start" }
+          opacity: 1,
+          y: 0,
+          duration: DISPLAY_LARGE_ANIM.duration,
+          ease: DISPLAY_LARGE_ANIM.ease,
+          stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" }
         });
       }
     });
   });
-  bunnyLog('activateLineReveal: done, ScrollTrigger count now', (typeof ScrollTrigger !== 'undefined' ? ScrollTrigger.getAll().length : 'n/a'));
 }
 
 let navTextSplits = [];
@@ -983,9 +1474,6 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
     const startTime = LINKS_START + charOffset * CHAR_STAGGER;
 
     const linkElForLog = navLinkEls && navLinkEls[i];
-    bunnyLog('buildNavTimeline: link', i, linkElForLog ? linkElForLog.className : '(no linkEl)',
-      'charCount=', chars.length, 'startTime=', startTime.toFixed(3),
-      'stillInDom=', chars[0] ? document.body.contains(chars[0]) : 'n/a');
 
     tl.to(chars, {
       yPercent: 0,
@@ -1050,11 +1538,9 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
     }, 1);
   }
 
-  // Diagnostic only — confirms whether the whole open animation actually
-  // reaches 100% each time it's played, and logs per-char state for every
-  // link right at that moment so a link that silently never left its
-  // hidden yPercent:100 state (reported: current page's own nav item
-  // looks static while opening) shows up directly in the console.
+  // Diagnostic only — logs per-char state for every link once the open
+  // animation completes, so a link stuck at its hidden yPercent:100 state
+  // shows up directly in the console.
   tl.eventCallback("onComplete", () => {
     const report = navLinkSplits.map((split, i) => {
       const linkEl = navLinkEls && navLinkEls[i];
@@ -1066,7 +1552,6 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
         lastCharTransform: chars.length ? chars[chars.length - 1].style.transform : null
       };
     });
-    bunnyLog('navTimeline onComplete — per-link char state:', JSON.stringify(report));
   });
 
   return tl;
@@ -1127,6 +1612,15 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   const navUlEl = navEl.querySelector('.nav__ul');
   if (!tileFill || !navUlEl) return;
 
+  // The rounded "cap" at the bottom of the tile is its own separate
+  // element (.nav__tile-fill > .nav__tile-cap > .nav__tile-circle) with its
+  // own background-color, bound in the Designer to a fixed color variable —
+  // so it needs tracking and tweening alongside tileFill wherever its
+  // backgroundColor changes below, or it stays stuck on that default color.
+  // An inline gsap-set style wins over the variable-bound class value.
+  // Guarded with `tileCircle &&` below in case the element is ever removed.
+  const tileCircle = navEl.querySelector('.nav__tile-circle');
+
   // Roll-hover wraps below get an explicit pixel width baked in from a
   // getBoundingClientRect() measurement, taken once here at first page
   // load (this whole function only ever runs once, from
@@ -1149,7 +1643,40 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   ];
 
   const defaultBg = getComputedStyle(tileFill).backgroundColor;
-  const defaultColors = colorTargets.map(el => getComputedStyle(el).color);
+  // b142 — read each target's NON-current colour. This runs once at first
+  // load; if that load was a page like Our Approach, its own nav link carries
+  // Webflow's w--current / aria-current styling (kiwiSkin) and that tinted
+  // colour was being stored as the link's "default" for the whole session —
+  // so after navigating away, the Approach link stayed kiwiSkin in the menu
+  // instead of going back to forest. Temporarily drop the current-page
+  // markers (and any inline colour / transition) while measuring.
+  const readDefaultColor = el => {
+    const hadCurrentClass = el.classList.contains('w--current');
+    const ariaCurrent = el.getAttribute('aria-current');
+    const prevColor = el.style.color;
+    const prevTransition = el.style.transition;
+    if (hadCurrentClass) el.classList.remove('w--current');
+    if (ariaCurrent !== null) el.removeAttribute('aria-current');
+    el.style.transition = 'none';
+    el.style.color = '';
+    const c = getComputedStyle(el).color;
+    el.style.color = prevColor;
+    el.style.transition = prevTransition;
+    if (hadCurrentClass) el.classList.add('w--current');
+    if (ariaCurrent !== null) el.setAttribute('aria-current', ariaCurrent);
+    return c;
+  };
+  const defaultColors = colorTargets.map(readDefaultColor);
+
+  // The nav's RESTING colors (shown when nothing is hovered) follow the
+  // current page's own link config — e.g. opening the menu on Packhouse
+  // rests on Packhouse's stone bg / configured text color, the same as
+  // hovering that link would show. Mutable — recomputed on every page
+  // enter by updateNavRestingColors() below, since the "current page"
+  // changes across a persistent nav's lifetime even though this whole
+  // setup function only ever runs once.
+  let restBg = defaultBg;
+  let restColor = null; // null = no page-specific override; use each target's own defaultColors[i]
 
   // Reuse the char splits already built in buildNavTimeline.
   const originalSplitByLink = new Map();
@@ -1242,21 +1769,13 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
 
       cloneWrap.style.cssText += 'position:absolute;top:0;left:50%;';
 
-      // b82: the clone's chars used to come from a second, independent
-      // SplitText({type:'chars'}) call on the same text. b80 tried
-      // matching its reduceWhiteSpace option to the original split's —
-      // that helped on some links ("Our Approach", Escapes/"Coming
-      // Soon") but not others ("Our Story" -> "OU RSTORY"), which means
-      // the real issue is SplitText's char-mode space handling itself
-      // being inconsistent from link to link, not just that one option.
-      // Rather than keep chasing SplitText's behavior, build the clone's
-      // characters by hand — one <span> per character straight from the
-      // known-correct source string, in guaranteed left-to-right order,
-      // with a non-breaking space standing in for a literal space (a
-      // lone space character in its own inline-block span is exactly
-      // the kind of thing browsers can collapse to zero width). This
-      // removes the second SplitText call — and its inconsistency —
-      // entirely, uniformly for every nav link.
+      // The clone's characters are built by hand — one <span> per
+      // character straight from the known-correct source string, in
+      // guaranteed left-to-right order, rather than via a second
+      // SplitText({type:'chars'}) call, whose whitespace handling proved
+      // inconsistent from link to link (e.g. "Our Story" -> "OU RSTORY").
+      // A literal space character in its own inline-block span can
+      // collapse to zero width, so a non-breaking space stands in for it.
       cloneWrap.textContent = '';
       cloneChars = Array.from(cloneLabel).map(ch => {
         const charEl = document.createElement('span');
@@ -1268,16 +1787,9 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       });
       gsap.set(cloneWrap, { xPercent: -50, yPercent: 100 });
 
-      // Diagnostic only (b80) — confirms whether the clone's char DOM
-      // order is already wrong the instant it's built (a SplitText
-      // whitespace-handling issue) vs. correct here and corrupted later
-      // by something else. Logs the ACTUAL rendered reading order
-      // (chars[].textContent joined) for both the clone and the
-      // original, straight after the split.
-      bunnyLog('roll-hover clone built for', link.className,
-        '— cloneWrap.textContent=', JSON.stringify(cloneWrap.textContent),
-        'cloneChars joined=', JSON.stringify(cloneChars.map(c => c.textContent).join('')),
-        'origSplit.chars joined=', JSON.stringify(origSplit.chars.map(c => c.textContent).join('')));
+      // Diagnostic only — logs the actual rendered reading order for both
+      // the clone and the original straight after the split, to catch a
+      // char-order regression early.
 
       // Paired index-by-index up to the LONGER of the two (Escapes vs.
       // Coming Soon differ in length) so no extra clone chars are left
@@ -1322,15 +1834,12 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const entry = linkConfigs.get(link);
     if (!entry) return;
     activeLink = link;
-    // Diagnostic only (b80) — re-checks the clone's DOM reading order at
-    // the actual moment of hover, to compare against the build-time log
-    // and confirm whether it's still correct here (pointing at a later
-    // corruption) or already wrong (pointing at the initial split/build).
+    // Diagnostic only — re-checks the clone's DOM reading order at the
+    // actual moment of hover, to compare against the build-time log.
     if (entry.cloneChars) {
-      bunnyLog('enter() hover on', link.className,
-        '— cloneChars joined=', JSON.stringify(entry.cloneChars.map(c => c.textContent).join('')));
     }
     gsap.to(tileFill, { backgroundColor: entry.config.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
+    if (tileCircle) gsap.to(tileCircle, { backgroundColor: entry.config.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
     gsap.to(colorTargets, { color: entry.config.color, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
 
     // Underline grows in, delayed to start once the char-shuffle's exit
@@ -1350,19 +1859,11 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     // Roll hover — original exits upward, clone rises into place below.
     // entry.rollPairs includes the SAME .nav-char elements the shared
     // navTimeline drives for the menu's own open/close reveal (origSplit
-    // is the split already built for that reveal, reused here rather
-    // than re-split). `overwrite: true` here used to kill whatever
-    // tween currently owns yPercent on those elements — which, right
-    // after the menu opens, IS navTimeline's own internal child tween
-    // for this link's chars, not just a previous hover tween. Once
-    // killed, navTimeline permanently loses control of those chars: its
-    // own reveal can stall mid-flight, and closing the menu (which
-    // deliberately skips re-running this same tween on close — see
-    // leave()'s skipRoll — because navTimeline was supposed to still
-    // own the reset) leaves the text stuck wherever the hover left it.
-    // Fixed by only ever killing OUR OWN previous hover tween
-    // (tracked per-entry) instead of a blanket overwrite, so this never
-    // reaches into navTimeline's tweens.
+    // is the split already built for that reveal, reused here rather than
+    // re-split). Only our own previous hover tween is ever killed here
+    // (tracked per-entry, not a blanket overwrite) — an overwrite that
+    // reached into navTimeline's own child tween for these chars would
+    // make navTimeline permanently lose control of them.
     if (entry.rollPairs) {
       if (entry.rollTween) entry.rollTween.kill();
       entry.rollTween = gsap.to(entry.rollPairs, {
@@ -1400,10 +1901,19 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const entry = linkConfigs.get(link);
     if (!entry) return;
     clearTimeout(imageRevealTimer);
-    gsap.to(tileFill, { backgroundColor: defaultBg, duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
-    colorTargets.forEach((el, i) => {
-      gsap.to(el, { color: defaultColors[i], duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
-    });
+    // b150 — keepColors: a menu-open page transition closes the menu in the
+    // colours it's currently showing (e.g. the hovered link's bg). Reverting
+    // to the resting colours here flashed the tile to the destination's
+    // resting colour (yellow) the moment a link was clicked.
+    if (!(opts && opts.keepColors)) {
+      // Revert to the current page's resting colors (restBg/restColor, kept
+      // up to date by updateNavRestingColors) rather than a fixed default.
+      gsap.to(tileFill, { backgroundColor: restBg, duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
+      if (tileCircle) gsap.to(tileCircle, { backgroundColor: restBg, duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
+      colorTargets.forEach((el, i) => {
+        gsap.to(el, { color: restColor || defaultColors[i], duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
+      });
+    }
     if (entry.underline) {
       gsap.killTweensOf(entry.underline);
       // Origin snaps to right instantly, matching the CSS.
@@ -1416,29 +1926,26 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       });
     }
     // Skipped on menu close (opts.skipRoll, set by resetAllLinks below) —
-    // navTimeline's own reverse() handles putting the ORIGINAL chars back
-    // to hidden, so animating entry.rollPairs here would just be
-    // unnecessary stacking on top of that (both use overwrite:false, see
-    // enter()'s comment).
-    //
-    // BUT rollPairs also includes the CLONE chars (the roll-hover's
-    // duplicate word, revealed on hover) — and navTimeline never touches
-    // those at all; it only ever knew about the original SplitText chars.
-    // If the menu closes via clicking the very link that's hovered (the
-    // normal way someone navigates through the menu) there's no mouseleave
-    // to run the real roll-out tween, so skipping it here left the clone
-    // sitting fully revealed forever — the next time this same persistent
-    // nav item's menu opens (e.g. after landing on the page just
-    // navigated to), the clone is already visible before navTimeline's
-    // reveal even starts, then the real char reveal plays underneath it —
-    // exactly the "visible immediately, then flashes" symptom. Killing any
-    // in-flight rollTween and force-resetting just the clone chars (not
-    // animated — the menu is closing/covered anyway) fixes that without
-    // touching what navTimeline already owns.
+    // navTimeline's own reverse() already puts the ORIGINAL chars back to
+    // hidden, so animating entry.rollPairs here would just stack on top of
+    // that. But rollPairs also includes the CLONE chars (the roll-hover's
+    // duplicate word), which navTimeline never touches at all — so those
+    // still need an explicit, unanimated reset here (the menu is
+    // closing/covered anyway), or the clone would be left sitting fully
+    // revealed the next time this nav item's menu opens.
     if (entry.rollPairs) {
       if (opts && opts.skipRoll) {
         if (entry.rollTween) entry.rollTween.kill();
         if (entry.cloneChars) gsap.set(entry.cloneChars, { yPercent: 0 });
+        // b132 — the hovered link's ORIGINAL chars were rolled up to -100 by
+        // the hover tween (clone showing in their place). Killing the tween
+        // and resetting only the clone left BOTH hidden — the label vanished
+        // the instant a click/close reset the hover state, and only came
+        // back on the next hover. Put the originals back to their open-menu
+        // resting position (0) at the same moment, so the swap is invisible
+        // (same word, same spot) and the menu's own reverse then slides them
+        // away normally.
+        if (activeLink === link && entry.originalSplit) gsap.set(entry.originalSplit.chars, { yPercent: 0 });
       } else {
         if (entry.rollTween) entry.rollTween.kill();
         entry.rollTween = gsap.to(entry.rollPairs, {
@@ -1473,26 +1980,22 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   linkConfigs.forEach((entry, link) => {
     link.addEventListener('mouseenter', () => {
       if (isSettled && !isSettled(link)) return;
+      // b132 — never start a hover while the menu is closing/closed.
+      if (navEl.getAttribute('data-navigation-status') !== 'active') return;
       if (activeLink && activeLink !== link) leave(activeLink);
       enter(link);
     });
     link.addEventListener('mouseleave', () => {
-      // b83: skip entirely while a Barba navigation is in flight
-      // (navigatingAway, set in barba.hooks.before, cleared once
-      // closeNavForTransition actually runs). disableNavLinkPointerEvents()
-      // sets pointer-events:none on every link the instant a navigation
-      // starts — and the browser fires a REAL mouseleave once it
-      // recomputes hit-testing for that, same as it did for display:none
-      // pre-b81 (see the b79 fix this replaces). Since b81 the menu stays
-      // visually open (and data-navigation-status stays 'active') through
-      // the whole leave transition, so the old `isNavActive` check below
-      // no longer catches this case — letting leave() run here would
-      // revert both this link's chars AND its hover color to default
-      // WHILE the menu is still visibly showing them, producing a flash
-      // (chars snapping back, color popping back to the default yellow)
-      // before the transition panel ever covers the screen. Everything
-      // gets reset anyway, invisibly, by closeNavForTransition() once the
-      // screen is actually covered — so there's nothing to do here.
+      // Skip entirely while a Barba navigation is in flight (navigatingAway,
+      // set in barba.hooks.before, cleared once closeNavForTransition
+      // actually runs). disableNavLinkPointerEvents() sets pointer-events:none
+      // on every link the instant a navigation starts, and the browser
+      // fires a real mouseleave once it recomputes hit-testing for that —
+      // letting leave() run here would revert this link's chars and hover
+      // color to default while the menu is still visibly open, producing a
+      // flash before the transition panel covers the screen. Everything
+      // gets reset invisibly by closeNavForTransition() once the screen is
+      // actually covered, so there's nothing to do here.
       if (navigatingAway) return;
       // Still needed for the ordinary case: nav closed via the close
       // button/background click/Escape sets data-navigation-status to
@@ -1509,15 +2012,52 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   // Closing the menu without a genuine mouseleave (close button, Escape,
   // background click) would otherwise leave the last-hovered link's
   // state stuck. skipRoll:true — see leave()'s own note.
-  function resetAllLinks() {
-    linkConfigs.forEach((entry, link) => leave(link, { skipRoll: true }));
+  function resetAllLinks(opts) {
+    const keepColors = !!(opts && opts.keepColors);
+    linkConfigs.forEach((entry, link) => leave(link, { skipRoll: true, keepColors }));
     activeLink = null;
   }
 
-  // Diagnostic only (b78) — exposes linkConfigs (has rollTween/cloneChars
-  // per link) so navDebugSnapshot() can inspect hover-roll state alongside
+  // Recomputes restBg/restColor from whichever nav link points at the
+  // CURRENT page (matched via the link's own .pathname against
+  // location.pathname, independent of Barba's w--current/aria-current
+  // class sync), then applies them immediately via gsap.set so the nav is
+  // already showing the right resting colors whenever it's next opened.
+  // Called once on load, and again on every Barba navigation (see
+  // barba.hooks.afterEnter).
+  function updateNavRestingColors() {
+    let matchedConfig = null;
+    linkConfigs.forEach((entry, link) => {
+      if (matchedConfig) return;
+      // Several nav links aren't built out as real pages yet and use a
+      // plain "#" (or empty) placeholder href. A same-page/fragment href's
+      // .pathname resolves to whatever page you're currently on, which
+      // would otherwise false-match every placeholder against every page
+      // — skip anything without a real href before comparing paths.
+      const href = link.getAttribute('href');
+      if (!href || href.charAt(0) === '#') return;
+      if (link.pathname === window.location.pathname) {
+        matchedConfig = entry.config;
+      }
+    });
+    restBg = matchedConfig ? matchedConfig.bg : defaultBg;
+    restColor = matchedConfig ? matchedConfig.color : null;
+    // Don't stomp on an in-progress hover (activeLink set) — that tween
+    // owns these properties right now and will itself revert to the new
+    // restBg/restColor on its own next leave().
+    if (activeLink) return;
+    gsap.set(tileFill, { backgroundColor: restBg });
+    if (tileCircle) gsap.set(tileCircle, { backgroundColor: restBg });
+    colorTargets.forEach((el, i) => {
+      gsap.set(el, { color: restColor || defaultColors[i] });
+    });
+  }
+  updateNavRestingColors();
+
+  // Diagnostic only — exposes linkConfigs (rollTween/cloneChars per link)
+  // so  can inspect hover-roll state alongside
   // navTimeline's own char state.
-  return { resetAllLinks, linkConfigs };
+  return { resetAllLinks, linkConfigs, updateNavRestingColors };
 }
 
 function initNavButtonCursorClose(navEl) {
@@ -1550,10 +2090,10 @@ function initNavButtonCursorClose(navEl) {
 // NAV AUTO-HIDE ON SCROLL
 // -----------------------------------------
 
-// .nav__bar (logo + menu button) slides up out of view on scroll down,
-// back in on scroll up. Stays put near the very top of the page and
-// while the full-screen menu is open. Set up once — nav lives outside
-// the Barba container, so it persists across page transitions.
+// .nav__bar (logo + menu button) fades out on scroll down, back in on
+// scroll up. Stays put near the very top of the page and while the
+// full-screen menu is open. Set up once — nav lives outside the Barba
+// container, so it persists across page transitions.
 function initNavAutoHide() {
   if (!hasScrollTrigger) return;
 
@@ -1561,10 +2101,28 @@ function initNavAutoHide() {
   const navBar = document.querySelector('.nav__bar');
   if (!navEl || !navBar) return;
 
-  let fade = 0; // 0 = fully visible, 1 = fully faded
+  // b106 — was a scrub: opacity tracked scroll distance 1:1 (fully faded
+  // after exactly one bar-height of downward scroll), so it moved in
+  // lockstep with the scrollbar rather than reading as an animation.
+  // Replaced with a discrete in/out tween instead — direction alone
+  // decides visibility, and each change of state plays one fixed-duration
+  // fade, the same way the rest of the site's chrome animates.
+  let visible = true;
   let lastScroll = 0;
-  let fadeDistance = navBar.offsetHeight;
-  window.addEventListener('resize', () => { fadeDistance = navBar.offsetHeight; });
+  const SHOW_NEAR_TOP = 100; // always visible this close to the page top
+  const DIRECTION_THRESHOLD = 5; // ignores sub-pixel/trackpad jitter
+
+  function setVisible(next) {
+    if (visible === next) return;
+    visible = next;
+    gsap.to(navBar, {
+      opacity: next ? 1 : 0,
+      duration: 0.4,
+      ease: 'power2.out',
+      overwrite: true,
+      onComplete: () => { navBar.style.pointerEvents = next ? 'auto' : 'none'; }
+    });
+  }
 
   ScrollTrigger.create({
     // Tagged so afterLeave's page-cleanup sweep (ScrollTrigger.getAll().
@@ -1584,16 +2142,12 @@ function initNavAutoHide() {
       lastScroll = current;
 
       // Full-screen menu open, or barely scrolled — always stay visible.
-      if (navEl.getAttribute('data-navigation-status') === 'active' || current < 100) {
-        fade = 0;
-      } else {
-        // Tracks the scroll amount directly (1:1), not a separate
-        // animation — fully faded after one bar-height of downward
-        // scroll, fully back after the same going up.
-        fade = gsap.utils.clamp(0, 1, fade + delta / fadeDistance);
+      if (navEl.getAttribute('data-navigation-status') === 'active' || current < SHOW_NEAR_TOP) {
+        setVisible(true);
+        return;
       }
-
-      gsap.set(navBar, { opacity: 1 - fade, pointerEvents: fade > 0.95 ? 'none' : 'auto' });
+      if (delta > DIRECTION_THRESHOLD) setVisible(false);
+      else if (delta < -DIRECTION_THRESHOLD) setVisible(true);
     }
   });
 }
@@ -1671,19 +2225,21 @@ function initFullScreenNavigation() {
   const CLOSE_SPEED = 1.6;
 
   function openNav() {
-    navDebugSnapshot('openNav:start (before play)');
     navSettled = false;
     readyLinks.clear();
     if (navLinkEls) {
       navLinkEls.forEach(el => { if (el) el.style.pointerEvents = 'none'; });
     }
     if (navTile) navTile.style.display = '';
+    // b132 — menu fully interactive again (closeNav makes the whole tile inert).
+    if (navTile) navTile.style.pointerEvents = '';
     navEl.setAttribute('data-navigation-status', 'active');
     if (lenis && typeof lenis.stop === "function") lenis.stop();
     navTimeline.timeScale(OPEN_SPEED).play();
   }
 
-  function closeNav() {
+  function closeNav(keepColors) {
+    // keepColors === true only from closeNavAnimated (event listeners pass an Event).
     navSettled = false;
     readyLinks.clear();
     // Plain writes, not gsap.set — pointer-events isn't a tracked
@@ -1691,7 +2247,10 @@ function initFullScreenNavigation() {
     if (navLinkEls) {
       navLinkEls.forEach(el => { if (el) el.style.pointerEvents = 'none'; });
     }
-    resetLinkHovers();
+    // b132 — whole menu inert while it closes, so a link can't be hovered
+    // (or clicked) on the way out.
+    if (navTile) navTile.style.pointerEvents = 'none';
+    resetLinkHovers({ keepColors: keepColors === true });
     navEl.setAttribute('data-navigation-status', 'not-active');
     navTimeline.timeScale(CLOSE_SPEED).reverse();
   }
@@ -1701,6 +2260,23 @@ function initFullScreenNavigation() {
   navTimeline.eventCallback("onReverseComplete", () => {
     if (navTile) navTile.style.display = 'none';
     if (lenis && typeof lenis.start === "function") lenis.start();
+  });
+
+  // b131 — promise-returning close used by the Barba transition.
+  closeNavAnimated = () => new Promise(resolve => {
+    if (navEl.getAttribute('data-navigation-status') !== 'active') return resolve();
+    const prev = navTimeline.eventCallback('onReverseComplete');
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      navTimeline.eventCallback('onReverseComplete', prev);
+      resolve();
+    };
+    navTimeline.eventCallback('onReverseComplete', () => { if (prev) prev(); finish(); });
+    closeNav(true);
+    if (navTimeline.progress() === 0) finish();
+    setTimeout(finish, 2500); // safety net
   });
 
   // Toggle Navigation
@@ -1731,7 +2307,8 @@ function initFullScreenNavigation() {
   try {
     const hoverEffects = initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, (link) => readyLinks.has(link), navLinkEls, navLinkSplits);
     if (hoverEffects && hoverEffects.resetAllLinks) resetLinkHovers = hoverEffects.resetAllLinks;
-    // Diagnostic only (b78) — see navDebugSnapshot().
+    if (hoverEffects && hoverEffects.updateNavRestingColors) updateNavRestingColors = hoverEffects.updateNavRestingColors;
+    // Diagnostic only — see .
     window.__navDebug = {
       navLinkEls, navLinkSplits, navTimeline,
       linkConfigs: hoverEffects && hoverEffects.linkConfigs
@@ -1744,15 +2321,15 @@ function initFullScreenNavigation() {
   // (display:none makes children measure as zero-size).
   if (navTile) navTile.style.display = 'none';
 
-  // b81: split into an immediate half (just pointer-events, so nothing
-  // in the still-visually-open menu can be interacted with again mid-
-  // transition) and a deferred half (the actual visual close — display:
-  // none, navTimeline/char reset, hover-state cleanup). barba.hooks.
-  // before calls the immediate half only; the deferred half is now
-  // called from the leave timeline's onComplete instead, once the
-  // transition panel has actually covered the screen — see that
-  // callback's own comment for why.
+  // Split into an immediate half (just pointer-events, so nothing in the
+  // still-visually-open menu can be interacted with mid-transition) and a
+  // deferred half (the actual visual close — display:none, navTimeline/
+  // char reset, hover-state cleanup). barba.hooks.before calls the
+  // immediate half only; the deferred half is called from the leave
+  // timeline's onComplete instead, once the transition panel has actually
+  // covered the screen — see closeNavForTransition's comment.
   disableNavLinkPointerEvents = () => {
+    if (navTile) navTile.style.pointerEvents = 'none';
     if (navLinkEls) {
       navLinkEls.forEach(el => { if (el) el.style.pointerEvents = 'none'; });
     }
@@ -1835,7 +2412,6 @@ function getBunnyParkHost() {
 // transition (and any reparenting) starts.
 function warmBunnyPlayers(scope) {
   (scope || document).querySelectorAll('[data-bunny-persist="true"]').forEach(function(player) {
-    bunnyLog('warmBunnyPlayers: warming', player.getAttribute('data-bunny-id'), 'at start of transition (barba.hooks.before)');
     if (player._io) { try { player._io.disconnect(); } catch(_) {} player._io = null; }
     resumePersistentPlayer(player);
   });
@@ -1909,10 +2485,6 @@ function captureBunnyFrame(player) {
   if (!video || !video.videoWidth) return null;
   try {
     var pRect = player.getBoundingClientRect();
-    bunnyLog('captureBunnyFrame:', player.getAttribute('data-bunny-id'),
-      '— decoded video is', video.videoWidth + 'x' + video.videoHeight,
-      '(readyState=' + video.readyState + '), player box is currently', Math.round(pRect.width) + 'x' + Math.round(pRect.height),
-      '(needed pixels ~' + Math.round(pRect.width * (window.devicePixelRatio||1)) + 'x' + Math.round(pRect.height * (window.devicePixelRatio||1)) + ' at dpr=' + (window.devicePixelRatio||1) + ')');
     var c = document.createElement('canvas');
     c.width = video.videoWidth;
     c.height = video.videoHeight;
@@ -1947,15 +2519,12 @@ function attachBunnyFrameBridge(player, canvas, video) {
     revealed = true;
     var revealRect = player.getBoundingClientRect();
     var liveVideo = video;
-    bunnyLog('attachBunnyFrameBridge: revealing', player.getAttribute('data-bunny-id'), '—', (performance.now() - revealScheduledAt).toFixed(0) + 'ms after the bridge was attached (had captured frame:', !!canvas, '). Player box at reveal:', Math.round(revealRect.width) + 'x' + Math.round(revealRect.height),
-      liveVideo ? ('— live decoded video now ' + liveVideo.videoWidth + 'x' + liveVideo.videoHeight) : '');
     player.setAttribute('data-player-status', 'playing');
     if (bridge && bridge.parentNode) bridge.parentNode.removeChild(bridge);
   };
 
   if (canvas) {
     var attachRect = player.getBoundingClientRect();
-    bunnyLog('attachBunnyFrameBridge: attaching bridge for', player.getAttribute('data-bunny-id'), '— captured canvas is', canvas.width + 'x' + canvas.height, 'player box at attach:', Math.round(attachRect.width) + 'x' + Math.round(attachRect.height));
     var dataUrl;
     try {
       dataUrl = canvas.toDataURL();
@@ -2018,9 +2587,6 @@ function resumeReparentedPlayer(player, capturedFrame) {
 // autoAlpha:0 at this point regardless (see runPageLeaveAnimation/
 // runPageEnterAnimation), so the swap is invisible either way.
 function reparentBunnyPlayers(current, next) {
-  bunnyLog('reparentBunnyPlayers: current has',
-    current ? current.querySelectorAll('[data-bunny-persist="true"][data-bunny-id]').length : 0,
-    'persistent player(s) to hand off; parkedBunnyPlayers map currently holds', parkedBunnyPlayers.size, 'id(s):', Array.from(parkedBunnyPlayers.keys()));
 
   if (current) {
     current.querySelectorAll('[data-bunny-persist="true"][data-bunny-id]').forEach(function(player) {
@@ -2032,14 +2598,12 @@ function reparentBunnyPlayers(current, next) {
         : null;
 
       if (placeholder) {
-        bunnyLog('reparentBunnyPlayers:', id, '— found matching placeholder in next, swapping directly (no park)');
         // Grab the frame before the move rebuilds the video's compositing
         // surface and blanks/blurs it for a beat.
         var frame = captureBunnyFrame(player);
         placeholder.replaceWith(player);
         resumeReparentedPlayer(player, frame);
       } else {
-        bunnyLog('reparentBunnyPlayers:', id, '— no placeholder in next, parking to', getBunnyParkHost().className || '(unnamed park host)');
         // Parking doesn't need a bridge — the park host is already
         // invisible (opacity:0) — so just resume it in place.
         getBunnyParkHost().appendChild(player);
@@ -2051,10 +2615,8 @@ function reparentBunnyPlayers(current, next) {
 
   if (next) {
     var reclaimCandidates = next.querySelectorAll('[data-bunny-persist="true"][data-bunny-background-init]');
-    bunnyLog('reparentBunnyPlayers: next has', reclaimCandidates.length, 'placeholder(s) that could be reclaimed');
     reclaimCandidates.forEach(function(placeholder) {
       var ok = reclaimParkedBunnyPlayer(placeholder);
-      bunnyLog('reparentBunnyPlayers: reclaim attempt for', placeholder.getAttribute('data-bunny-id'), '→', ok ? 'reclaimed from park' : 'nothing parked under that id (left for initBunnyPlayerBackground to init fresh)');
     });
   }
 }
@@ -2071,7 +2633,6 @@ function reclaimParkedBunnyPlayer(placeholder) {
   var parked = parkedBunnyPlayers.get(id);
   if (!parked) return false;
 
-  bunnyLog('reclaimParkedBunnyPlayer: pulling', id, 'out of the park host into its hero slot');
   var frame = captureBunnyFrame(parked);
 
   placeholder.replaceWith(parked);
@@ -2081,12 +2642,10 @@ function reclaimParkedBunnyPlayer(placeholder) {
 }
 
 function initBunnyPlayerBackground(scope) {
-  bunnyLog('initBunnyPlayerBackground: running (afterEnter backstop) — checking', (scope || document).querySelectorAll('[data-bunny-background-init]').length, 'placeholder(s) in scope');
   (scope || document).querySelectorAll('[data-bunny-background-init]').forEach(function(player) {
     // A persistent player parked from a previous page takes over this
     // placeholder instead of being reinitialized from scratch.
     if (player.getAttribute('data-bunny-persist') === 'true' && reclaimParkedBunnyPlayer(player)) {
-      bunnyLog('initBunnyPlayerBackground:', player.getAttribute('data-bunny-id'), 'was reclaimed here as a backstop — reparentBunnyPlayers did NOT already handle it. This means the leave-timeline reclaim was too early/late or missed this element.');
       return;
     }
 
@@ -2392,16 +2951,32 @@ function initGlobalParallax(scope) {
         const endAttr = trigger.getAttribute('data-parallax-end');
 
         const scrub = scrubAttr !== null ? parseFloat(scrubAttr) : true;
-        const startVal = startAttr !== null ? parseFloat(startAttr) : 20;
-        const endVal = endAttr !== null ? parseFloat(endAttr) : -20;
+        // b116 — subtler default travel (was 20/-20, i.e. 40 total yPercent
+        // of movement edge-to-edge); any element can still override via
+        // data-parallax-start/-end in Webflow.
+        const startVal = startAttr !== null ? parseFloat(startAttr) : 8;
+        const endVal = endAttr !== null ? parseFloat(endAttr) : -8;
 
         const scrollStart = `clamp(${trigger.getAttribute('data-parallax-scroll-start') || 'top bottom'})`;
         const scrollEnd = `clamp(${trigger.getAttribute('data-parallax-scroll-end') || 'bottom top'})`;
 
+        // b118 — scale now scrubs continuously alongside yPercent/xPercent,
+        // same scrollTrigger, same progress — a steady zoom-out tied to
+        // scroll position, not just a one-off at entrance (that's
+        // prepareImageReveal/activateImageReveal's job: the rise+blur+fade,
+        // which still fires once; scale moved out of there to avoid two
+        // tweens fighting over the same property on the same element).
+        const scaleStartAttr = trigger.getAttribute('data-parallax-scale-start');
+        const scaleEndAttr = trigger.getAttribute('data-parallax-scale-end');
+        const scaleStart = scaleStartAttr !== null ? parseFloat(scaleStartAttr) : 1.05;
+        const scaleEnd = scaleEndAttr !== null ? parseFloat(scaleEndAttr) : 1;
+
         gsap.fromTo(target, {
-          [prop]: startVal
+          [prop]: startVal,
+          scale: scaleStart
         }, {
           [prop]: endVal,
+          scale: scaleEnd,
           ease: 'none',
           scrollTrigger: {
             trigger,
@@ -2421,62 +2996,328 @@ function initGlobalParallax(scope) {
 // DISPLAY-LARGE / DISPLAY-MEDIUM SCROLL REVEAL
 // -----------------------------------------
 
-// Same shape as the nav links' original character reveal (opacity + rise
-// + rotateY flip), own timing — kept separate from NAV_CHAR_ANIM so
-// changing one doesn't affect the other. Covers both .text-display-large
-// and .text-display-medium.
+// b110/b111/b112/b113/b114 — standardized to a plain rise + blur + opacity
+// fade (move up 0.5em, blur(BLUR_PX) -> blur(0), opacity 0 -> 1), per LINE,
+// unmasked (b114 dropped the `mask: "lines"` overflow-hidden wrapper —
+// was per word in b111, chars with a rotateY flip before that). Kept
+// separate from NAV_CHAR_ANIM so changing one doesn't affect the other.
+// Covers both .text-display-large and .text-display-medium. b112 —
+// quicker: travel halved to 0.5em, duration cut from 1.2s to 0.7s, stagger
+// tightened from 0.025 to 0.018.
 const DISPLAY_LARGE_ANIM = {
-  travel: 50,
-  rotate: 90,
-  duration: 1.2,
-  stagger: 0.025,
+  travelEm: 0.5,
+  // b129 — rise for the big hero headings only (they're 144-160px, so 0.5em = 72-80px, far more than body text). Before b128 the hero's rise was converted too early on a fresh load and came out ~1px, so refresh looked subtle while Barba showed the full 0.5em. Tune this one number.
+  headingTravelEm: 0.15,
+  blurPx: 0, // b134 — blur removed from all text/image/sticker reveals (no filter is applied any more)
+  duration: 0.7,
+  stagger: 0.018,
   ease: 'power3.out'
 };
 
 // Same prepare/activate split as prepareLineReveal/activateLineReveal, and
 // for the same reason — see that comment.
+//
+// Orchards/Packhouse (and any similar page) split a single heading across
+// TWO separate .text-display-large/-medium elements, one per line, each
+// wrapped in its own .display__title__line inside a shared
+// .hero__secondary__title__wrap. Every line sharing that wrapper is
+// grouped into a single ScrollTrigger (triggered off the wrapper itself,
+// so it fires based on where the whole heading sits, not just the first
+// line) driving one continuous stagger across every line in DOM
+// order — otherwise each line would only start once it individually
+// crossed the viewport threshold, reading as two unrelated reveals
+// instead of one heading. A heading with no such wrapper still gets its
+// own group of one, triggered off itself.
+const DISPLAY_LARGE_GROUP_SELECTOR = '.hero__secondary__title__wrap';
+
 function prepareDisplayLargeReveal(scope) {
-  if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
+  if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") {
+    heroTitleGroups = new Map();
+    return [];
+  }
 
   const targets = (scope || document).querySelectorAll('.text-display-large, .text-display-medium');
-  const prepared = [];
+  const groups = [];
+  const groupByWrap = new Map();
+
   targets.forEach(el => {
+    // b114 — no line mask: animates whole lines directly, unclipped (the
+    // rise+blur+opacity fade reads fine without the overflow-hidden mask,
+    // and it let the blur get clipped at the mask edge).
     const split = new SplitText(el, {
-      type: "words,chars",
+      type: "lines",
       reduceWhiteSpace: false
     });
-    gsap.set(split.chars, {
-      autoAlpha: 0,
-      yPercent: DISPLAY_LARGE_ANIM.travel,
-      rotateY: DISPLAY_LARGE_ANIM.rotate,
-      transformPerspective: 600
+    gsap.set(split.lines, {
+      opacity: 0,
+      y: `${DISPLAY_LARGE_ANIM.headingTravelEm}em`,
     });
-    prepared.push({ split, trigger: el });
+
+    const wrap = el.closest(DISPLAY_LARGE_GROUP_SELECTOR);
+    if (wrap) {
+      let group = groupByWrap.get(wrap);
+      if (!group) {
+        group = { trigger: wrap, splits: [] };
+        groupByWrap.set(wrap, group);
+        groups.push(group);
+      }
+      group.splits.push(split);
+    } else {
+      groups.push({ trigger: el, splits: [split] });
+    }
   });
-  return prepared;
+
+  // Record which .section__hero__content each group belongs to (null if
+  // none), and index groups that DO belong to one in heroTitleGroups so
+  // prepareLineReveal (called right after this) can tell whether the
+  // hero's own intro paragraph should be tagged for activateDisplayLargeReveal
+  // to fire. Rebuilt from scratch on every navigation — stale entries from
+  // the previous page must not leak forward.
+  //
+  // .section__hero__content isn't actually scoped to just the hero — on
+  // Orchards/Packhouse/Our Story it's the single outer <section id="about">
+  // wrapping the entire page's content, since it's the shared Webflow class
+  // used for section padding, not a "this is the hero" marker. Also record
+  // introWrap — the FIRST .hero__secondary__content__wrap inside the hero
+  // section, which is always the true intro block — so prepareLineReveal
+  // can scope its match down to just that wrap instead of the whole
+  // page-wide section (without this, every [data-line-reveal] anywhere on
+  // the page gets swept into firing early alongside the title).
+  heroTitleGroups = new Map();
+  groups.forEach(group => {
+    const heroSection = group.trigger.closest && group.trigger.closest('.section__hero__content');
+    group.heroSection = heroSection || null;
+
+    const introWrap = heroSection ? heroSection.querySelector('.hero__secondary__content__wrap') : null;
+    group.introWrap = introWrap || null;
+
+    if (heroSection) heroTitleGroups.set(heroSection, group);
+  });
+
+  return groups;
 }
 
-function activateDisplayLargeReveal(prepared) {
-  bunnyLog('activateDisplayLargeReveal: activating', (prepared || []).length, 'prepared reveal(s)');
-  (prepared || []).forEach(({ split, trigger }) => {
+// linePrepared: the array prepareLineReveal returned (pendingLineReveals),
+// passed through so a group whose heroSection was claimed by one of its
+// entries (see prepareLineReveal/activateLineReveal) can fire that entry's
+// own reveal right here — in the very same onEnter callback as the
+// title's — rather than trusting two independently-created ScrollTriggers
+// to fire on the same tick, which isn't guaranteed.
+function activateDisplayLargeReveal(prepared, linePrepared) {
+  (prepared || []).forEach(({ trigger, splits, heroSection }) => {
     ScrollTrigger.create({
       trigger: trigger,
       start: "top 90%",
       once: true,
       onEnter: () => {
-        bunnyLog('activateDisplayLargeReveal: onEnter fired for', trigger.className || trigger.tagName);
-        gsap.to(split.chars, {
-          autoAlpha: 1,
-          yPercent: 0,
-          rotateY: 0,
+        const allLines = splits.flatMap(s => s.lines);
+        // b113 — plain rise + blur + opacity fade, per line (see DISPLAY_LARGE_ANIM).
+        // b128 — fromTo with the rise re-measured NOW, instead of a plain .to()
+        // from whatever y prepareDisplayLargeReveal baked in earlier. That y
+        // was converted from em to px while the page was still being set up
+        // behind the transition panel (next position:fixed, mid-swap); on a
+        // Barba navigation the font-size it measured could differ from the
+        // final, settled layout, so the start offset came out bigger than on
+        // a fresh load (where everything's already settled when it's
+        // prepared) — headings rose in from too far down. Lines are still
+        // opacity 0 here, so re-setting their start offset is invisible.
+        const preparedY = allLines.length ? gsap.getProperty(allLines[0], 'y') : 0;
+        const titleTween = gsap.fromTo(allLines, {
+          opacity: 0,
+          y: (i, el) => parseFloat(getComputedStyle(el).fontSize) * DISPLAY_LARGE_ANIM.headingTravelEm,
+        }, {
+          opacity: 1,
+          y: 0,
           duration: DISPLAY_LARGE_ANIM.duration,
           ease: DISPLAY_LARGE_ANIM.ease,
           stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" }
         });
+        if (allLines.length) {
+        }
+
+        // Fire the hero's own intro paragraph (if any) right here, in this
+        // same callback, so it starts on the exact same tick as the title.
+        // syncDuration comes from the tween GSAP just built
+        // (titleTween.duration() — the real, computed total including its
+        // stagger tail), not a hand-recomputed formula, so it can't drift
+        // out of step. Each matched paragraph keeps the site's normal
+        // per-line stagger and solves only its own duration to land on
+        // that same total — floored so a large line count can't push it
+        // negative.
+        if (heroSection && linePrepared) {
+          const syncDuration = titleTween.duration();
+          linePrepared.forEach(entry => {
+            if (entry.heroSection !== heroSection) return;
+            // b115 — matches [data-line-reveal]'s own tween now (DISPLAY_LARGE_ANIM's
+            // stagger/ease), not the old LINE_REVEAL_STAGGER/"expo.out" pairing.
+            const stagger = DISPLAY_LARGE_ANIM.stagger;
+            const lineCount = entry.split.lines.length;
+            const duration = Math.max(0.4, syncDuration - Math.max(0, lineCount - 1) * stagger);
+            gsap.to(entry.split.lines, {
+              opacity: 1,
+              y: 0,
+              duration: duration,
+              ease: DISPLAY_LARGE_ANIM.ease,
+              stagger: { each: stagger, from: "start" }
+            });
+          });
+        }
       }
     });
   });
-  bunnyLog('activateDisplayLargeReveal: done, ScrollTrigger count now', (typeof ScrollTrigger !== 'undefined' ? ScrollTrigger.getAll().length : 'n/a'));
+}
+
+// -----------------------------------------
+// HORIZONTAL RULE REVEAL
+// -----------------------------------------
+
+// b143 — every .horizontal-rule (the 1px bg-coloured divs, e.g. between
+// Contact's form fields) draws in from 0 width to full width, left to right,
+// once, as it scrolls into view. scaleX (not width) so it's GPU-cheap and
+// doesn't reflow; same prepare (hidden, behind the transition) /
+// activate (ScrollTrigger, at "pageReady") split as the other reveals.
+const RULE_REVEAL = { duration: 1, ease: 'power3.out' };
+
+function prepareRuleReveal(scope) {
+  if (typeof ScrollTrigger === "undefined") return [];
+  const rules = Array.from((scope || document).querySelectorAll('.horizontal-rule'));
+  if (rules.length) gsap.set(rules, { scaleX: 0, transformOrigin: 'left center' });
+  return rules;
+}
+
+function activateRuleReveal(rules) {
+  (rules || []).forEach(el => {
+    ScrollTrigger.create({
+      trigger: el,
+      start: 'top 92%',
+      once: true,
+      onEnter: () => gsap.to(el, { scaleX: 1, duration: RULE_REVEAL.duration, ease: RULE_REVEAL.ease })
+    });
+  });
+}
+
+// -----------------------------------------
+// STICKER POP-IN REVEAL
+// -----------------------------------------
+
+// b120 — switched from the bounce/scale pop (faded/dropped/scaled down,
+// then bounced up) to the site's standard rise + blur + opacity reveal —
+// same treatment as the display headings and the parallax images, so all
+// three scroll-ins read as one consistent motif. Reuses IMAGE_REVEAL_RISE_REM
+// and DISPLAY_LARGE_ANIM's blur/duration/ease rather than its own numbers.
+
+// Every sticker wrapper on the site (hero__sticker, what-we-do__item__
+// sticker, cta__sticker-1..6, and any future one) contains exactly one
+// icon with this class — .sticker__svg normally, .sticker__sv on one
+// instance (a stray typo'd class in the Designer; matched here too rather
+// than fixed there, since fixing it wouldn't be a JS change). Targeting
+// the icon itself (not its wrapper) keeps this independent of whatever
+// the wrapper's own class happens to be.
+const STICKER_SELECTOR = '.sticker__svg, .sticker__sv';
+
+// Same prepare/activate split as the other scroll reveals, and for the
+// same reason — see prepareLineReveal's comment.
+function prepareStickerReveal(scope) {
+  if (typeof ScrollTrigger === "undefined") return [];
+
+  const targets = (scope || document).querySelectorAll(STICKER_SELECTOR);
+  const prepared = [];
+  targets.forEach(el => {
+    gsap.set(el, {
+      opacity: 0,
+      y: `${IMAGE_REVEAL_RISE_REM}rem`,
+    });
+    prepared.push({ el });
+  });
+  return prepared;
+}
+
+function activateStickerReveal(prepared) {
+  (prepared || []).forEach(({ el }) => {
+    ScrollTrigger.create({
+      trigger: el,
+      start: 'top 90%',
+      once: true,
+      onEnter: () => {
+        gsap.to(el, {
+          opacity: 1,
+          y: 0,
+          duration: DISPLAY_LARGE_ANIM.duration,
+          ease: DISPLAY_LARGE_ANIM.ease
+        });
+      }
+    });
+  });
+}
+
+// -----------------------------------------
+// IMAGE SCROLL REVEAL
+// -----------------------------------------
+
+// b117/b118 — every [data-parallax="trigger"] image gets a one-time
+// scroll-in reveal on top of its existing continuous parallax drift (see
+// GLOBAL PARALLAX above): same rise + blur + opacity treatment as the
+// display headings (DISPLAY_LARGE_ANIM). This is a separate tween from the
+// parallax scrub — that one drives yPercent/scale continuously as the page
+// scrolls; this one drives y/opacity/filter once, as the image enters the
+// viewport. GSAP tracks yPercent and y (both translateY) independently and
+// composites them on the same transform, so the two never fight each
+// other. b118 — the zoom (scale 1.05 -> 1) moved into initGlobalParallax's
+// own scrubbed tween instead of firing here once: the user wanted it tied
+// to scroll position throughout, the same way the yPercent drift is, not
+// just resolved on entrance. Keeping it here too would have meant two
+// tweens racing for "scale" on the same element. Same prepare/activate
+// split as the other scroll reveals, and for the same reason — see
+// prepareLineReveal's comment.
+//
+// b119 — the rise wasn't visible: DISPLAY_LARGE_ANIM.travelEm (0.5em) is
+// sized against a HEADING's own (large) font-size, which is what makes it
+// read clearly on text. .image__wrap has no font-size of its own — it
+// inherits whatever's ambient on the page — so the same "em" value could
+// resolve to only a few px on an image, nowhere near what it is on a
+// heading. Using rem (root font-size, not the element's inherited one)
+// instead keeps this predictable regardless of where the image sits.
+const IMAGE_REVEAL_RISE_REM = 1;
+
+function prepareImageReveal(scope) {
+  if (typeof ScrollTrigger === "undefined") return [];
+
+  // b148 — also the Contact page's Webflow map widget (.contact__map): same
+  // rise + fade-in as the images, without any parallax (it isn't a
+  // [data-parallax] element, so initGlobalParallax leaves it alone).
+  // b149 — and every .btn, so buttons reveal the same way.
+  const targets = (scope || document).querySelectorAll('[data-parallax="trigger"], .contact__map, .btn');
+  const prepared = [];
+  targets.forEach(trigger => {
+    // Same target resolution as initGlobalParallax (a '[data-parallax="target"]'
+    // child if one exists, else the trigger itself), so this reveal and the
+    // continuous parallax scrub always land on the identical element.
+    const el = trigger.querySelector('[data-parallax="target"]') || trigger;
+    gsap.set(el, {
+      opacity: 0,
+      y: `${IMAGE_REVEAL_RISE_REM}rem`,
+    });
+    prepared.push({ el, trigger });
+  });
+  return prepared;
+}
+
+function activateImageReveal(prepared) {
+  (prepared || []).forEach(({ el, trigger }) => {
+    ScrollTrigger.create({
+      trigger: trigger,
+      start: 'top 90%',
+      once: true,
+      onEnter: () => {
+        gsap.to(el, {
+          opacity: 1,
+          y: 0,
+          duration: DISPLAY_LARGE_ANIM.duration,
+          ease: DISPLAY_LARGE_ANIM.ease
+        });
+      }
+    });
+  });
 }
 
 // -----------------------------------------
@@ -2694,12 +3535,16 @@ function revealCharsRollIn(el, opts) {
 // it before re-splitting.
 let activeMenuLabelSplit = null;
 
-function prepareLoadReveal(scope) {
+function prepareLoadReveal(scope, opts) {
   const root = scope || document;
+  // b139 — on a Barba navigation the logo + menu label stay put (no hide /
+  // re-roll); only a true first load plays their intro. Colour changes
+  // between pages still animate (see resetPersistentNavColor).
+  const withChrome = !opts || opts.chrome !== false;
 
   // Persistent chrome — outside the Barba container, queried from document.
-  const logo = document.querySelector('.nav__logo');
-  const menuLabel = document.querySelector('.nav__button-label');
+  const logo = withChrome ? document.querySelector('.nav__logo') : null;
+  const menuLabel = withChrome ? document.querySelector('.nav__button-label') : null;
   const videoTexts = Array.from(root.querySelectorAll('.video-section__text'));
 
   // Nothing to reveal on this page — no intro to prepare or play.
@@ -2820,6 +3665,9 @@ const COLOR_ZONES = [
     btn: { bg: COLORS.spring, text: COLORS.forest }
   }
 ];
+// b136 — zone colour change speed (bg, text, nav, zone buttons). Was 0.6s;
+// shortened to feel as snappy as the nav-link hover colour change.
+const COLOR_ZONE_DURATION = 0.3;
 let colorZoneSTs = [];
 
 function initColorZones(scope) {
@@ -2849,7 +3697,25 @@ function initColorZones(scope) {
   // unlike Home's dark video hero which relies on the CSS default.
   const navDefaultOverrideKey = target.getAttribute('data-nav-default-color');
   const navDefaultOverride = navDefaultOverrideKey ? COLORS[navDefaultOverrideKey] : null;
-  const defaultNavColors = navTargets.map(el => navDefaultOverride || getComputedStyle(el).color);
+  // b135 — .nav__logo / .nav__button-label have `transition: all` in
+  // Webflow. Arriving from a page that had tinted them (e.g. Our Approach's
+  // light green), resetPersistentNavColor clears the inline color moments
+  // before this runs, so a plain getComputedStyle() here read the colour
+  // MID-TRANSITION (still light green) and stored it as the "default" — the
+  // hero's resting nav colour then came back light green instead of white.
+  // Read the true CSS colour with the transition suspended and any inline
+  // colour set aside.
+  const readRestingColor = el => {
+    const prevTransition = el.style.transition;
+    const prevColor = el.style.color;
+    el.style.transition = 'none';
+    el.style.color = '';
+    const c = getComputedStyle(el).color;
+    el.style.color = prevColor;
+    el.style.transition = prevTransition;
+    return c;
+  };
+  const defaultNavColors = navTargets.map(el => navDefaultOverride || readRestingColor(el));
 
   // Apply an override immediately — otherwise it wouldn't take effect
   // until the first scroll-back-into-hero event.
@@ -2858,9 +3724,9 @@ function initColorZones(scope) {
   }
 
   const revertToDefault = () => {
-    gsap.to(target, { backgroundColor: defaultBg, color: defaultText, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
+    gsap.to(target, { backgroundColor: defaultBg, color: defaultText, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
     navTargets.forEach((el, i) => {
-      gsap.to(el, { color: defaultNavColors[i], duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(el, { color: defaultNavColors[i], duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
     });
   };
 
@@ -2869,8 +3735,8 @@ function initColorZones(scope) {
     if (!trigger) return;
 
     const setZone = () => {
-      gsap.to(target, { backgroundColor: bg, color: text, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
-      if (navTargets.length) gsap.to(navTargets, { color: text, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(target, { backgroundColor: bg, color: text, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
+      if (navTargets.length) gsap.to(navTargets, { color: text, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
 
       // Retint any buttons that live inside this zone's own section —
       // updates their resting colors (not just a one-off tween) so a
@@ -2882,8 +3748,8 @@ function initColorZones(scope) {
           if (!middle) return;
           btnEl._restBg = btn.bg;
           btnEl._restText = btn.text;
-          gsap.to(middle, { backgroundColor: btn.bg, color: btn.text, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
-          if (caps.length) gsap.to(caps, { color: btn.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
+          gsap.to(middle, { backgroundColor: btn.bg, color: btn.text, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
+          if (caps.length) gsap.to(caps, { color: btn.bg, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
         });
       }
     };
@@ -2957,22 +3823,12 @@ function buildRollPairs(textNode) {
   origEl.style.cssText += 'position:absolute;top:0;left:0;';
   cloneEl.style.cssText += 'position:absolute;top:0;left:0;';
 
-  const origChars = new SplitText(origEl, { type: 'chars' }).chars;
-  const cloneChars = new SplitText(cloneEl, { type: 'chars' }).chars;
-  // Offset the clone's CONTAINER, not the individual chars — same trick
-  // the nav links use. With cloneEl pushed down 100% and its chars left
-  // at their natural yPercent:0, the same -100/0 tween shared with the
-  // orig chars below lands the clone exactly in place instead of
-  // sliding it further off-screen.
+  // b126 — rolls as one whole line (orig up/out, clone up/in), no per-char
+  // split or stagger. The clone starts pushed down 100%; enter/leave in
+  // initButtonHoverFocus tween both elements directly.
   gsap.set(cloneEl, { yPercent: 100 });
 
-  const maxLen = Math.max(origChars.length, cloneChars.length);
-  const pairs = [];
-  for (let i = 0; i < maxLen; i++) {
-    if (origChars[i]) pairs.push(origChars[i]);
-    if (cloneChars[i]) pairs.push(cloneChars[i]);
-  }
-  return pairs;
+  return { orig: origEl, clone: cloneEl };
 }
 
 function initButtonHoverFocus(scope) {
@@ -3012,14 +3868,16 @@ function initButtonHoverFocus(scope) {
       gsap.to(caps, { color: HOVER_BG, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
       gsap.to(middle, { backgroundColor: HOVER_BG, color: HOVER_TEXT, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
       if (rollPairs) {
-        gsap.to(rollPairs, { yPercent: -100, stagger: { amount: 0.2 }, duration: 0.65, ease: 'osmo', overwrite: true });
+        gsap.to(rollPairs.orig, { yPercent: -100, duration: 0.65, ease: 'osmo', overwrite: true });
+        gsap.to(rollPairs.clone, { yPercent: 0, duration: 0.65, ease: 'osmo', overwrite: true });
       }
     };
     const leave = () => {
       gsap.to(caps, { color: btn._restBg, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
       gsap.to(middle, { backgroundColor: btn._restBg, color: btn._restText, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
       if (rollPairs) {
-        gsap.to(rollPairs, { yPercent: 0, stagger: { amount: 0.2, from: 'end' }, duration: 0.65, ease: 'osmo', overwrite: true });
+        gsap.to(rollPairs.orig, { yPercent: 0, duration: 0.65, ease: 'osmo', overwrite: true });
+        gsap.to(rollPairs.clone, { yPercent: 100, duration: 0.65, ease: 'osmo', overwrite: true });
       }
     };
 
@@ -3028,5 +3886,352 @@ function initButtonHoverFocus(scope) {
     // focus/blur cover keyboard navigation.
     btn.addEventListener('focus', enter);
     btn.addEventListener('blur', leave);
+  });
+}
+
+// -----------------------------------------
+// PARALLAX IMAGE SLIDER (Smooothy) — Our Story
+// -----------------------------------------
+// Osmo Supply resource, wired into Barba instead of its own standalone
+// DOMContentLoaded listener. [data-parallax-init]/-slider/-inner/-amount/
+// -snap/-infinite/-lerp are the resource's own attributes, untouched — see
+// the resource doc for what each does.
+//
+// Smooothy attaches its own drag/resize/rAF-driven listeners per instance
+// (Core class exposes destroy() to clean those up — see
+// https://github.com/vallafederico/smooothy), and the onUpdate callback
+// here is additionally pushed onto the shared gsap.ticker. Neither tears
+// itself down when Barba swaps the container out, so without explicit
+// cleanup a Smooothy instance from a page navigated away from would keep
+// its ticker callback running forever, and revisiting the same page would
+// stack duplicate instances — same "clear previous, rebuild" shape as
+// initColorZones' colorZoneSTs.
+let activeParallaxSliders = [];
+
+function destroyParallaxImageSliders() {
+  activeParallaxSliders.forEach(({ slider, tick }) => {
+    gsap.ticker.remove(tick);
+    if (slider && typeof slider.destroy === 'function') slider.destroy();
+  });
+  activeParallaxSliders = [];
+}
+
+// b100 — decade timeline sync (Our Story). Each slide carries its own
+// .text__slider__date label, bound in Webflow to that slide's Date
+// reference's own Name (e.g. "1980's") — decadeKeys below reads that text
+// and slugifies it (lowercase, punctuation stripped) to match each
+// .slider__timeline__item's domId, which is bound to that same decade's
+// own Slug (e.g. "1980s"). So the slider (Timeline collection) and the
+// description list (Timeline Decades collection), otherwise unrelated in
+// the DOM, stay matched via a visible CMS value rather than a hidden id
+// or JS-side content duplication. Which slide counts as "active" is
+// decided in initParallaxImageSlider's own per-frame tick, by comparing
+// each slide's live getBoundingClientRect() against the slider's own
+// center — not by Smooothy's internal parallaxValues, which were never a
+// reliable signal here (this instance's data-parallax-amount is 0, so
+// that value has no visible effect to have ever been exercised through).
+function initDecadeTimelinePanels(scope, decadeKeys) {
+  if (typeof SplitText === "undefined" || !decadeKeys.some(Boolean)) return null;
+
+  const panels = new Map();
+  (scope || document).querySelectorAll('.slider__timeline__item').forEach(item => {
+    const textEl = item.querySelector('[data-decade-text]');
+    if (!item.id || !textEl) return;
+    const split = new SplitText(textEl, { type: "lines", mask: "lines" });
+    gsap.set(split.lines, { yPercent: 120 });
+    gsap.set(item, { display: 'none' });
+    panels.set(item.id, { item, split });
+  });
+  if (!panels.size) return null;
+
+  // b107 — the exit half of the transition (below) runs quicker than the
+  // site-standard LINE_REVEAL_DURATION/STAGGER used for the roll-in, since
+  // it's a brief "get out of the way" beat rather than a second reveal.
+  const DECADE_OUT_DURATION = 0.5;
+  const DECADE_OUT_STAGGER = 0.03;
+
+  let activeId = null;
+  // b105 — the previously-showing panel now animates its lines out before
+  // the next one animates in, instead of both moves happening at once.
+  // transitionTl holds whichever out-then-in sequence is currently
+  // running, so a fast scroll through several decades (calling
+  // showDecade again before the last sequence finished) can cleanly kill
+  // it and reset every panel except the new target back to its resting
+  // hidden state, rather than leaving one stuck half-revealed.
+  let transitionTl = null;
+  return {
+    panels,
+    showDecade(id) {
+      if (!id) return;
+      if (id === activeId) return;
+      if (!panels.has(id)) {
+        return;
+      }
+
+      if (transitionTl) transitionTl.kill();
+
+      const prevId = activeId;
+      const prev = prevId ? panels.get(prevId) : null;
+      const next = panels.get(id);
+      activeId = id;
+
+      // Any panel other than the outgoing and incoming ones (there
+      // shouldn't normally be one, but an interrupted transition can
+      // leave one mid-flight) is snapped straight back to resting/hidden.
+      panels.forEach((panel, panelId) => {
+        if (panelId === id || panelId === prevId) return;
+        gsap.killTweensOf(panel.split.lines);
+        gsap.set(panel.split.lines, { yPercent: 120 });
+        gsap.set(panel.item, { display: 'none' });
+      });
+
+      transitionTl = gsap.timeline({ onComplete: () => { transitionTl = null; } });
+
+      if (prev) {
+        // b107 — out moves down (yPercent 120, the same resting/hidden
+        // position the "in" reveal starts from) instead of further up and
+        // off-screen, and runs much quicker than the in-reveal — it's a
+        // brief exit, not a second full reveal, so it shouldn't cost as
+        // much time as the roll-in does.
+        transitionTl
+          .to(prev.split.lines, {
+            yPercent: 120,
+            duration: DECADE_OUT_DURATION,
+            ease: "power2.in",
+            stagger: { each: DECADE_OUT_STAGGER, from: "start" }
+          })
+          .set(prev.item, { display: 'none' });
+      }
+
+      // ...then next's lines reveal in, same roll as before.
+      transitionTl
+        .set(next.item, { display: '' })
+        .to(next.split.lines, {
+          yPercent: 0,
+          duration: LINE_REVEAL_DURATION,
+          ease: "expo.out",
+          stagger: { each: LINE_REVEAL_STAGGER, from: "start" }
+        });
+    }
+  };
+}
+
+// b101 — decade stickers (Our Story). Each slide carries all six decade
+// stickers stacked directly on top of each other in the markup
+// (.slider__stickers__wrap > .slider__timeline__sticker.is__<decade>, e.g.
+// is__1980), all visible by default. Only the slide that STARTS a new
+// decade run should show a sticker — its own — every other slide
+// (including later slides within the same decade) shows none. decadeKeys
+// is already computed per slide by initParallaxImageSlider (see the
+// comment above initDecadeTimelinePanels); sticker class names drop the
+// trailing "s" that decadeKeys carries for the round-decade values
+// ("1980s" -> "1980"), so that's converted here. Slide order never
+// changes at runtime, so this only needs to run once, on init.
+function initSliderStickers(slides, decadeKeys) {
+  const seenDecades = new Set();
+  slides.forEach((slide, i) => {
+    const wrap = slide.querySelector('.slider__stickers__wrap');
+    if (!wrap) return;
+    const key = decadeKeys[i];
+    const stickerKey = key ? key.replace(/^(\d{4})s$/, '$1') : null;
+    const isFirstOfDecade = !!key && !seenDecades.has(key);
+    if (key) seenDecades.add(key);
+    [...wrap.children].forEach((sticker) => {
+      const show = isFirstOfDecade && sticker.classList.contains(`is__${stickerKey}`);
+      sticker.style.display = show ? '' : 'none';
+    });
+  });
+}
+
+// b108 — per-slide image format (Our Story). .parallax-slider__item-inner
+// used to carry one fixed aspect-ratio for every slide; now it carries
+// none of its own, and one of three combo classes — is--landscape
+// (3/2), is--square (1/1), is--portrait (2/3), added in Webflow — is
+// picked per slide from that slide's own image's REAL dimensions
+// (.parallax-slider__item-img's naturalWidth/naturalHeight), not the
+// container. Runs once per slide, on init — an image already loaded
+// (from cache, or because it was already in the viewport) is classified
+// immediately; one still loading is classified on its own load event.
+const IMAGE_FORMAT_CLASSES = ['is--landscape', 'is--square', 'is--portrait'];
+
+function classifySliderImageFormat(inner, img) {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h) return;
+  const ratio = w / h;
+  const formatClass = ratio > 1.05 ? 'is--landscape' : ratio < 0.95 ? 'is--portrait' : 'is--square';
+  inner.classList.remove(...IMAGE_FORMAT_CLASSES);
+  inner.classList.add(formatClass);
+}
+
+function initSliderImageFormats(slides) {
+  slides.forEach((slide) => {
+    const inner = slide.querySelector('.parallax-slider__item-inner');
+    const img = slide.querySelector('.parallax-slider__item-img');
+    if (!inner || !img) return;
+    if (img.complete && img.naturalWidth) {
+      classifySliderImageFormat(inner, img);
+    } else {
+      img.addEventListener('load', () => classifySliderImageFormat(inner, img), { once: true });
+    }
+  });
+}
+
+function initParallaxImageSlider(scope) {
+  if (typeof Smooothy === "undefined") return;
+
+  // Belt-and-suspenders — destroyParallaxImageSliders' own call site in
+  // runPageLeaveAnimation handles normal teardown; this guards against
+  // running twice for the same live page without an intervening navigation.
+  destroyParallaxImageSliders();
+
+  (scope || document).querySelectorAll("[data-parallax-init]").forEach((root) => {
+    // The smooothy list
+    const wrapper = root.querySelector("[data-parallax-slider]");
+    if (!wrapper) return;
+
+    // One parallax layer per slide (optional)
+    const slides = [...wrapper.children];
+    const parallaxItems = slides.map((slide) => slide.querySelector("[data-parallax-inner]"));
+
+    // b100 — index-aligned with parallaxItems/slides above; see this
+    // function's own comment above initDecadeTimelinePanels for what
+    // .text__slider__date actually holds and why it's slugified.
+    const decadeKeys = slides.map((slide) => {
+      const dateEl = slide.querySelector('.text__slider__date');
+      const text = dateEl ? dateEl.textContent.trim() : '';
+      return text ? text.toLowerCase().replace(/[^a-z0-9]/g, '') : null;
+    });
+    const decadeTimeline = initDecadeTimelinePanels(scope, decadeKeys);
+    initSliderStickers(slides, decadeKeys);
+    // b109 — paused for now: reverted the Webflow side back to every
+    // image being the fixed landscape (3/2) box it always was. The
+    // function itself (initSliderImageFormats, above) and its Webflow
+    // combo classes are left in place, untouched, so this is a one-line
+    // re-enable rather than rebuilding it later.
+    // initSliderImageFormats(slides);
+    let decadeTickCount = 0;
+
+    // Parallax amount
+    const amountAttr = wrapper.getAttribute("data-parallax-amount");
+    const amount = amountAttr !== null ? parseFloat(amountAttr) : 12;
+
+    // Snap to a slide
+    const snap = wrapper.getAttribute("data-parallax-snap") !== "false";
+
+    // Loop
+    const infinite = wrapper.getAttribute("data-parallax-infinite") !== "false";
+
+    // Slide smoothing
+    const lerpAttr = wrapper.getAttribute("data-parallax-lerp");
+    const lerp = lerpAttr !== null ? parseFloat(lerpAttr) : 0.3;
+
+    const maxOffset = 25;
+
+    // b104 — corrects a real bug in how Smooothy positions slides when
+    // they're spaced with margin instead of padding (confirmed by reading
+    // the actual published package, smooothy@0.0.35's dist/esm.js — not
+    // just its docs, which describe options that turned out not to touch
+    // this at all). Smooothy assumes every slide sits exactly one
+    // itemWidth apart and translates every slide by the SAME px value,
+    // `current * itemWidth` (see #J() in its source), where itemWidth is
+    // only ever measured from getBoundingClientRect(), which does NOT
+    // include a slide's own margin. This site's .parallax-slider__item
+    // has a margin-right between slides (Osmo's own docs actually warn
+    // against exactly this — "avoid using gaps; wrap slides in divs with
+    // padding applied to those wrapper elements" — but this track uses a
+    // margin instead), so Smooothy's shift is one slide-width-worth short
+    // of the real per-slide distance, and that shortfall accumulates by
+    // one slide's worth of margin per index — which is exactly why the
+    // very first slide always lines up and it drifts further the deeper
+    // you scroll.
+    //
+    // b103 fixed that by subtracting the accumulated shortfall back out
+    // per slide, but that also cancels the margin itself out of the
+    // rendered gap between adjacent slides — the alignment was right but
+    // the gap disappeared. The real fix: replace Smooothy's per-slide
+    // step (itemWidth alone) with the REAL step (itemWidth + the actual
+    // margin), applied as the same single shift to every slide, exactly
+    // like Smooothy's own code does — that keeps the natural gap intact
+    // while still landing the active slide flush with the text column.
+    // realStepPx/itemWidthPx are both measured once, pre-transform, at
+    // init. Only meaningful for the non-infinite, non-variableWidth
+    // branch of Smooothy's source (#J()) that this instance uses —
+    // infinite mode's wraparound math (#Q()) is left untouched. Where
+    // slides truly are itemWidth apart already (no margin/gap), the scale
+    // factor comes out to 1 and this changes nothing.
+    const itemWidthPx = !infinite && slides[0] ? slides[0].getBoundingClientRect().width : 0;
+    const realStepPx = itemWidthPx && slides.length > 1
+      ? slides[1].getBoundingClientRect().left - slides[0].getBoundingClientRect().left
+      : itemWidthPx;
+    const stepScale = itemWidthPx ? realStepPx / itemWidthPx : 1;
+
+    const slider = new Smooothy(wrapper, {
+      infinite,
+      snap,
+      lerpFactor: lerp,
+      onUpdate: ({ parallaxValues }) => {
+        parallaxItems.forEach((item, i) => {
+          if (!item) return;
+          const offset = gsap.utils.clamp(-maxOffset, maxOffset, parallaxValues[i] * amount);
+          item.style.transform = `translateX(${offset}%)`;
+        });
+
+        // b104 — re-apply Smooothy's own shift to every slide, scaled up
+        // from "one itemWidth per slide" to "one real step (itemWidth +
+        // margin) per slide".
+        if (stepScale !== 1 && parallaxValues.length) {
+          const shift = parallaxValues[0] * stepScale;
+          slides.forEach((slide) => {
+            slide.style.transform = `translateX(${shift}px)`;
+          });
+        }
+      },
+    });
+
+    // Smooothy's own internal "last update" timestamp starts at 0, not the
+    // moment the instance is created — so its very first update() call
+    // (whenever that ends up being, which can be long after page load for
+    // a slider this far down the page) computes an enormous deltaTime and
+    // jumps almost all the way to `target` in a single frame instead of
+    // animating smoothly. init() resets that timestamp to now, so the
+    // first real update() behaves like any other frame.
+    slider.init();
+
+    // Same fix as above, but for every time the slider becomes visible
+    // again after a stretch of being invisible (scrolled past, then back
+    // to). isVisible is a plain public field Smooothy updates from its own
+    // IntersectionObserver, polled here without touching its internals.
+    let wasVisible = slider.isVisible;
+    const tick = () => {
+      if (slider.isVisible && !wasVisible) slider.init();
+      wasVisible = slider.isVisible;
+      slider.update();
+
+      // b100 — real geometry, not Smooothy internals: whichever slide's
+      // own center sits closest to the slider's own horizontal center is
+      // "active", checked fresh every frame.
+      if (decadeTimeline) {
+        const wrapperRect = wrapper.getBoundingClientRect();
+        const wrapperCenter = wrapperRect.left + wrapperRect.width / 2;
+        let bestIndex = -1, bestDist = Infinity;
+        slides.forEach((slide, i) => {
+          if (!decadeKeys[i]) return;
+          const rect = slide.getBoundingClientRect();
+          const center = rect.left + rect.width / 2;
+          const dist = Math.abs(center - wrapperCenter);
+          if (dist < bestDist) { bestDist = dist; bestIndex = i; }
+        });
+        // Diagnostic only — logs every ~30th tick so the console isn't
+        // flooded, to confirm the geometry and decadeKeys line up while
+        // dragging the slider.
+        decadeTickCount++;
+        if (decadeTickCount % 30 === 0) {
+        }
+        if (bestIndex !== -1) decadeTimeline.showDecade(decadeKeys[bestIndex]);
+      }
+    };
+    gsap.ticker.add(tick);
+    activeParallaxSliders.push({ slider, tick });
   });
 }
