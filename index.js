@@ -75,6 +75,8 @@ let closeNavAnimated = () => Promise.resolve();
 // new page in. leaveDone flags the leave's prepare step as finished.
 let navWasOpenForTransition = false;
 let leaveDone = false;
+let navClosed = Promise.resolve(); // resolves once the menu has finished closing
+let hardNavigating = false; // a full page load has taken over from this transition
 // b144 — nav class/colour sync held back until the open menu has closed.
 let pendingNavUpdateData = null;
 
@@ -97,7 +99,7 @@ gsap.defaults({ ease: "osmo", duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b150';
+const BUILD = 'b193';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -401,6 +403,7 @@ function initOnceFunctions() {
   // per-page re-init (the old jQuery $(".field").on(...) only bound to
   // fields present at first load, so it died after a page change).
   initFormFieldLabels();
+  initEmailCopy();
   initFormSubmitMirror();
   initFormSendingState();
 
@@ -443,10 +446,20 @@ function initMenuButtonHover() {
   const clone = document.createElement('span');
   clone.className = label.className;
   clone.setAttribute('aria-hidden', 'true');
-  clone.textContent = (label.textContent || '').trim();
-  clone.style.cssText += ';position:absolute;top:0;left:0;width:100%;pointer-events:none;transition:none;';
+  // b151 — hover swaps "Menu" for "Open" (clone carries the hover word).
+  clone.textContent = 'Open';
+  clone.style.cssText += ';position:absolute;top:0;left:0;width:auto;white-space:nowrap;pointer-events:none;transition:none;';
   wrap.appendChild(clone);
   gsap.set(clone, { yPercent: 100, autoAlpha: 1 });
+
+  // Size the clipped wrapper to the wider word so neither is cut off.
+  const fitWrap = () => {
+    wrap.style.minWidth = '';
+    const w = Math.max(label.getBoundingClientRect().width, clone.getBoundingClientRect().width);
+    if (w) wrap.style.minWidth = Math.ceil(w) + 'px';
+  };
+  fitWrap();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitWrap);
 
   const syncColor = () => { clone.style.color = getComputedStyle(label).color; };
   let syncing = false;
@@ -468,6 +481,7 @@ function initMenuButtonHover() {
     gsap.to(clone, { yPercent: 0, ...ROLL });
   };
   const rollOut = (instant) => {
+    if (!instant && isOpen()) return; // b152 — keep "Open" in place while the menu is open
     if (instant) {
       gsap.killTweensOf([label, clone], 'yPercent');
       gsap.set(label, { yPercent: 0 });
@@ -483,13 +497,96 @@ function initMenuButtonHover() {
   button.addEventListener('mouseleave', () => rollOut(false));
   button.addEventListener('focus', rollIn);
   button.addEventListener('blur', () => rollOut(false));
-  // Opening/closing the menu: put the label back at once so the nav
-  // timeline's own fade of the label never shows the clone.
-  button.addEventListener('click', () => rollOut(true));
+  // b152 — on open, keep "Open" showing and fade it out with the label (no
+  // flash back to "Menu"); once the menu starts closing, reset the roll
+  // instantly while the label is still transparent.
+  let wasOpen = isOpen();
+  new MutationObserver(() => {
+    const open = isOpen();
+    if (open === wasOpen) return;
+    wasOpen = open;
+    if (open) {
+      startSync();
+      gsap.to(clone, { autoAlpha: 0, duration: 0.3, ease: 'power1.out', overwrite: 'auto' });
+    } else {
+      gsap.killTweensOf(clone);
+      gsap.set(clone, { yPercent: 100, autoAlpha: 1 });
+      gsap.killTweensOf(label, 'yPercent');
+      gsap.set(label, { yPercent: 0 });
+      stopSync();
+    }
+  }).observe(navEl, { attributes: true, attributeFilter: ['data-navigation-status'] });
+}
+
+// b162 — links tagged [data-copy-email] copy their address to the clipboard instead of
+// opening a mail client, and its text reads "Copied to clipboard" for 3s.
+// Delegated on document (bound once) so it survives Barba swaps. Text is
+// swapped at the text-node level so any SplitText line wrappers stay intact.
+function initEmailCopy() {
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const MESSAGE = 'Copied to clipboard';
+  const HOLD_MS = 3000;
+
+  const getEmail = (a) => {
+    const href = a.getAttribute('href') || '';
+    if (/^mailto:/i.test(href)) return decodeURIComponent(href.replace(/^mailto:/i, '').split('?')[0]).trim();
+    const t = (a.textContent || '').trim();
+    return EMAIL_RE.test(t) ? t : null;
+  };
+
+  const copyText = async (text) => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+    } catch (e) { /* fall through */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  };
+
+  document.addEventListener('click', async (e) => {
+    const a = e.target.closest && e.target.closest('[data-copy-email]');
+    if (!a) return;
+    const email = getEmail(a);
+    if (!email) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (a._copyTimer) return; // already showing the message
+
+    const ok = await copyText(email);
+    if (!ok) { window.location.href = 'mailto:' + email; return; }
+
+    const walker = document.createTreeWalker(a, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) { if (walker.currentNode.nodeValue.trim()) nodes.push(walker.currentNode); }
+    if (!nodes.length) return;
+    const originals = nodes.map(n => n.nodeValue);
+    // data-copy-email="lowercase" shows the message in lowercase, whatever the link's own text-transform
+    const lowercase = a.getAttribute('data-copy-email') === 'lowercase';
+    nodes[0].nodeValue = lowercase ? MESSAGE.toLowerCase() : MESSAGE;
+    for (let i = 1; i < nodes.length; i++) nodes[i].nodeValue = '';
+    if (lowercase) a.style.textTransform = 'none';
+    a._copyTimer = setTimeout(() => {
+      nodes.forEach((n, i) => { n.nodeValue = originals[i]; });
+      if (lowercase) a.style.textTransform = '';
+      a._copyTimer = null;
+    }, HOLD_MS);
+  }, true);
 }
 
 function initBeforeEnterFunctions(next) {
   nextPage = next || document;
+
+  // With the maps module already loaded (visited Contact earlier), start the
+  // incoming page's map by hand — Webflow only does it on a full page load.
+  if (next && next.querySelector('.w-widget-map')) Webflow.require('maps')?.ready();
 
   // Runs before the enter animation
   // if (has('[data-something]')) initSomething();
@@ -622,7 +719,7 @@ function initAfterEnterFunctions(next) {
   // and intentionally left out here — prepared from the leave timeline's
   // onComplete, activated at the enter timeline's "startEnter" label. See
   // prepareLineReveal/activateLineReveal and prepareDisplayLargeReveal/
-  // activateDisplayLargeReveal. runPageOnceAnimation calls both halves
+  // activateDisplayLargeReveal. prepareOnceAnimation and playOnceAnimation run both halves
   // together for the true first load, which has no covered window to
   // prepare behind.
   if (has('[data-bunny-background-init]')) initBunnyPlayerBackground(nextPage);
@@ -658,40 +755,119 @@ function initAfterEnterFunctions(next) {
 // PAGE TRANSITIONS
 // -----------------------------------------
 
-function runPageOnceAnimation(next) {
-  const tl = gsap.timeline();
+// True first load has no covered-transition window to prepare behind, so the
+// two halves of a transition's reveal run back to back: prepare (hide)
+// straight away, behind the preloader if there is one, then play once it has
+// gone, so nothing shows before it animates in.
+function prepareOnceAnimation(next) {
+  resetPage(next);
 
-  tl.call(() => {
-    resetPage(next);
-  }, null, 0);
+  const loadReveal = prepareLoadReveal(next);
+  // prepareDisplayLargeReveal must run before prepareLineReveal: it
+  // populates heroTitleGroups (see that map's own comment), which
+  // prepareLineReveal reads to tag the hero's own intro paragraph so
+  // activateDisplayLargeReveal fires it together with the title instead
+  // of activateLineReveal giving it its own trigger.
+  const displayLarge = prepareDisplayLargeReveal(next);
+  const lines = prepareLineReveal(next);
 
-  tl.call(() => {
-    // True first load has no covered-transition window to prepare behind
-    // — page is visible from the start — so prepare and activate/play
-    // together, same as a real transition's two halves normally split
-    // across leave's onComplete and enter's "startEnter".
-    playLoadReveal(prepareLoadReveal(next));
-    // prepareDisplayLargeReveal must run before prepareLineReveal: it
-    // populates heroTitleGroups (see that map's own comment), which
-    // prepareLineReveal reads to tag the hero's own intro paragraph so
-    // activateDisplayLargeReveal fires it together with the title instead
-    // of activateLineReveal giving it its own trigger.
-    const displayLargePrepared = prepareDisplayLargeReveal(next);
-    const linePrepared = prepareLineReveal(next);
-    activateLineReveal(linePrepared);
-    activateDisplayLargeReveal(displayLargePrepared, linePrepared);
-    activateStickerReveal(prepareStickerReveal(next));
-    activateImageReveal(prepareImageReveal(next));
-    activateRuleReveal(prepareRuleReveal(next));
-    // An above-the-fold ScrollTrigger (the hero title, since "top 90%" is
-    // already past at scroll 0) can be created with a stale start position
-    // and never fire its once:true onEnter — refreshing right after
-    // creation corrects it. Below-the-fold reveals aren't affected; they
-    // fire normally as the user scrolls to them.
-    if (hasScrollTrigger) ScrollTrigger.refresh();
-  }, null, 0);
+  return {
+    loadReveal,
+    displayLarge,
+    lines,
+    stickers: prepareStickerReveal(next),
+    images: prepareImageReveal(next),
+    rules: prepareRuleReveal(next)
+  };
+}
 
-  return tl;
+function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, rules }) {
+  playLoadReveal(loadReveal);
+  activateLineReveal(lines);
+  activateDisplayLargeReveal(displayLarge, lines);
+  activateStickerReveal(stickers);
+  activateImageReveal(images);
+  activateRuleReveal(rules);
+  // An above-the-fold ScrollTrigger (the hero title, since "top 90%" is
+  // already past at scroll 0) can be created with a stale start position
+  // and never fire its once:true onEnter — refreshing right after
+  // creation corrects it. Below-the-fold reveals aren't affected; they
+  // fire normally as the user scrolls to them.
+  if (hasScrollTrigger) ScrollTrigger.refresh();
+}
+
+// -----------------------------------------
+// PRELOADER
+// -----------------------------------------
+
+// First visit only. Plays the Webflow Lottie for at least two and a half
+// seconds, then wipes the panel away bottom-up, the same way the menu panel
+// closes, while the Lottie drifts up and fades out with it. If the page has a
+// hero video it is already loading behind the panel, and the panel waits (up
+// to a limit) until it is playing. Resolves as the wipe nears its end so the
+// page intro can start with it. The markup is the Loader component;
+// html.preloader-skip (site head) hides it on repeat visits.
+const PRELOADER_KEY = 'wh-preloader-seen'; // timestamp of the last play; the head snippet reads it too
+const PRELOADER_EXPIRY = 24 * 60 * 60 * 1000; // plays again once a day
+const PRELOADER_FORCE = new URLSearchParams(location.search).has('preloader'); // ?preloader to test
+const PRELOADER_HOLD = 2.5; // minimum seconds the Lottie plays before the wipe
+const PRELOADER_VIDEO_MAX = 3; // longest the wipe waits for the hero video
+const PRELOADER_FADE = 0.3;
+const PRELOADER_LIFT = -200; // yPercent the Lottie is pulled up by the wipe
+const PRELOADER_WIPE = { duration: 0.9, ease: 'osmo' };
+const PRELOADER_INTRO_AT = 0.5; // seconds into the wipe when the page intro starts (the ease is visually done by then)
+
+function getPreloaderLottie(preloader) {
+  const lottie = Webflow.require('lottie')?.lottie;
+  const animations = lottie ? lottie.getRegisteredAnimations() : [];
+  return animations.find(anim => preloader.contains(anim.wrapper));
+}
+
+function waitSeconds(seconds) {
+  return new Promise(resolve => gsap.delayedCall(seconds, resolve));
+}
+
+function waitForHeroVideo(container) {
+  const player = container.querySelector('[data-bunny-background-init]');
+  if (!player || player.dataset.playerStatus === 'playing') return Promise.resolve();
+
+  return new Promise(resolve => {
+    const observer = new MutationObserver(() => {
+      if (player.dataset.playerStatus !== 'playing') return;
+      observer.disconnect();
+      resolve();
+    });
+    observer.observe(player, { attributes: true, attributeFilter: ['data-player-status'] });
+    waitSeconds(PRELOADER_VIDEO_MAX).then(() => {
+      observer.disconnect();
+      resolve();
+    });
+  });
+}
+
+async function runPreloader(container) {
+  const preloader = document.querySelector('[data-preloader]');
+  if (!preloader) return;
+
+  const lastSeen = Number(localStorage.getItem(PRELOADER_KEY));
+  if (Date.now() - lastSeen < PRELOADER_EXPIRY && !PRELOADER_FORCE) {
+    preloader.remove();
+    return;
+  }
+  localStorage.setItem(PRELOADER_KEY, Date.now());
+
+  await new Promise(resolve => Webflow.push(resolve));
+  getPreloaderLottie(preloader)?.goToAndPlay(0, true);
+  await Promise.all([waitSeconds(PRELOADER_HOLD), waitForHeroVideo(container)]);
+
+  const lottieEl = preloader.querySelector('[data-preloader-lottie]');
+  await new Promise(resolve => {
+    const tl = gsap.timeline({ onComplete: () => preloader.remove() });
+    tl.to(lottieEl, { autoAlpha: 0, duration: PRELOADER_FADE, ease: 'power1.out' }, 0);
+    tl.to(lottieEl, { yPercent: PRELOADER_LIFT, ...PRELOADER_WIPE }, 0);
+    tl.to(preloader, { clipPath: 'inset(0% 0% 100% 0%)', ...PRELOADER_WIPE }, 0);
+    tl.call(resolve, null, PRELOADER_INTRO_AT);
+  });
 }
 
 // Holds prepared (SplitText + hidden) state for the incoming page's
@@ -718,7 +894,7 @@ let pendingRuleReveals = null;
 // real GSAP-reported duration instead of a hand-recomputed formula.
 //
 // Populated by prepareDisplayLargeReveal (always called before
-// prepareLineReveal — see the call sites in runPageOnceAnimation and
+// prepareLineReveal — see the call sites in prepareOnceAnimation and
 // runPageLeaveAnimation's onComplete): each hero section's title group,
 // keyed by the .section__hero__content element it belongs to, plus that
 // group's introWrap (the true intro block — see prepareDisplayLargeReveal's
@@ -867,12 +1043,15 @@ function runPageLeaveAnimation(current, next) {
 
 async function runPageEnterAnimation(next){
 
+  // The page is about to be reloaded in full — leave the screen as it is.
+  if (hardNavigating) return new Promise(() => {});
+
   // b131 — menu was open: wait for the leave's swap, then animate the menu
   // closed (page behind it is already the new one, still hidden), and only
   // then fade the new page in and run its reveals.
   if (navWasOpenForTransition) {
     await new Promise(r => { const t = () => (leaveDone ? r() : setTimeout(t, 16)); t(); });
-    await closeNavAnimated();
+    await navClosed;
     closeNavForTransition();
     resetPersistentNavColor(next);
     if (pendingNavUpdateData) {
@@ -1033,6 +1212,17 @@ barba.hooks.before(data => {
   // Pointer-events are still disabled right away, so nothing in the
   // (still visually open) menu can be clicked/hovered mid-transition.
   disableNavLinkPointerEvents();
+  // b178 — with the menu open, start closing it right away instead of waiting
+  // for the leave step. The outgoing page is hidden first so the closing menu
+  // reveals the page background, not the old content.
+  navClosed = Promise.resolve();
+  if (navWasOpenForTransition && data && data.current && data.current.container) {
+    const outgoing = data.current.container;
+    if (pageBaseBg === null) pageBaseBg = getComputedStyle(document.body).backgroundColor;
+    gsap.set(document.body, { backgroundColor: getContainerBg(outgoing) });
+    gsap.set(outgoing, { backgroundColor: 'transparent', opacity: 0 });
+    navClosed = closeNavAnimated();
+  }
   // Also suppress the hover mouseleave's color revert for the same
   // reason — see navigatingAway's own comment and the mouseleave listener
   // in initNavLinkHoverEffects.
@@ -1080,6 +1270,16 @@ barba.hooks.beforeEnter(data => {
 
   if (lenis && typeof lenis.stop === "function") {
     lenis.stop();
+  }
+
+  // Webflow ships its maps module only with pages that use it, so it is
+  // missing when arriving from a page without a map (e.g. Home -> Contact)
+  // and can't be loaded after the fact. Fall back to a full page load there,
+  // once the menu has closed / the old page has faded out.
+  if (data.next.container.querySelector('.w-widget-map') && !Webflow.require('maps')) {
+    const settled = navWasOpenForTransition ? navClosed : waitSeconds(TRANSITION_FADE_OUT);
+    hardNavigating = true;
+    return settled.then(() => window.location.assign(data.next.url.href));
   }
 
   initBeforeEnterFunctions(data.next.container);
@@ -1167,7 +1367,15 @@ barba.init({
         // background once the page has loaded (no-op on Home).
         schedulePreloadHomeHeroVideo();
 
-        return runPageOnceAnimation(data.next.container);
+        // Start the hero video loading now so it is playing by the time the
+        // preloader finishes (initAfterEnterFunctions skips it once initialised).
+        initBunnyPlayerBackground(data.next.container);
+
+        const intro = prepareOnceAnimation(data.next.container);
+        // The page is hidden by the site head until its intro state is set (no flash of final content).
+        document.documentElement.classList.remove('wh-loading');
+        await runPreloader(data.next.container);
+        playOnceAnimation(intro);
       },
 
       // Current page leaves
@@ -1334,7 +1542,7 @@ function prepareLineReveal(scope) {
       let unit = el.parentElement;
       while (unit && getComputedStyle(unit).display === 'inline') unit = unit.parentElement;
       if (unit && !inlineUnits.has(unit)) {
-        inlineUnits.set(unit, el.getAttribute('data-line-reveal-start') || 'top 90%');
+        inlineUnits.set(unit, el.getAttribute('data-line-reveal-start') || 'top 85%');
       }
       return;
     }
@@ -1350,7 +1558,7 @@ function prepareLineReveal(scope) {
     // Per-element override — e.g. footer links set data-line-reveal-start="top 100%"
     // so they trigger right as they reach the viewport, instead of the
     // page-wide default of "top 90%".
-    const start = el.getAttribute('data-line-reveal-start') || 'top 90%';
+    const start = el.getAttribute('data-line-reveal-start') || 'top 85%';
 
     // The hero's own intro paragraph ([data-line-reveal] living inside the
     // hero's .section__hero__content) is tagged with that section here IF
@@ -1468,21 +1676,21 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   // Main links — one .to() per link (not one flattened array) so each
   // link's own finish time can be computed and its pointer-events
   // re-enabled right then, rather than waiting on the whole group.
-  let charOffset = 0;
+  // b154 — each link rises as one line (all its chars together, no per-char
+  // stagger); links stagger one after another like the other line reveals.
+  const LINK_STAGGER = 0.08;
+  const LINK_DURATION = 0.8;
   navLinkSplits.forEach((split, i) => {
     const chars = split.chars;
-    const startTime = LINKS_START + charOffset * CHAR_STAGGER;
-
-    const linkElForLog = navLinkEls && navLinkEls[i];
+    const startTime = LINKS_START + i * LINK_STAGGER;
 
     tl.to(chars, {
       yPercent: 0,
-      duration: CHAR_DURATION,
-      ease: CHAR_EASE,
-      stagger: { each: CHAR_STAGGER, from: "start" }
+      duration: LINK_DURATION,
+      ease: CHAR_EASE
     }, startTime);
 
-    const finishTime = startTime + Math.max(0, chars.length - 1) * CHAR_STAGGER + CHAR_DURATION;
+    const finishTime = startTime + LINK_DURATION;
     const linkEl = navLinkEls && navLinkEls[i];
     if (linkEl) {
       // Plain DOM write, not tl.set() — a timeline-tracked property gets
@@ -1490,12 +1698,10 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
       // reset.
       tl.call(() => { if (onLinkReady) onLinkReady(linkEl); }, null, finishTime);
     }
-
-    charOffset += chars.length;
   });
 
   // Marks when the whole link group is done (dimming, secondary elements).
-  const linksGroupEnd = LINKS_START + charOffset * CHAR_STAGGER + CHAR_DURATION;
+  const linksGroupEnd = LINKS_START + Math.max(0, navLinkSplits.length - 1) * LINK_STAGGER + LINK_DURATION;
   tl.addLabel("linksDone", linksGroupEnd);
   tl.call(() => { if (onReady) onReady(); }, null, "linksDone");
 
@@ -1620,6 +1826,9 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   // An inline gsap-set style wins over the variable-bound class value.
   // Guarded with `tileCircle &&` below in case the element is ever removed.
   const tileCircle = navEl.querySelector('.nav__tile-circle');
+  // b153 — menu panel slides in with a straight bottom edge: hide the curved cap.
+  const tileCap = navEl.querySelector('.nav__tile-cap');
+  if (tileCap) tileCap.style.display = 'none';
 
   // Roll-hover wraps below get an explicit pixel width baked in from a
   // getBoundingClientRect() measurement, taken once here at first page
@@ -1867,8 +2076,8 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     if (entry.rollPairs) {
       if (entry.rollTween) entry.rollTween.kill();
       entry.rollTween = gsap.to(entry.rollPairs, {
+        // b155 — whole line rolls together (no per-char stagger)
         yPercent: -100,
-        stagger: { amount: 0.2 },
         duration: 0.65,
         ease: 'osmo',
         overwrite: false
@@ -1950,7 +2159,6 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         if (entry.rollTween) entry.rollTween.kill();
         entry.rollTween = gsap.to(entry.rollPairs, {
           yPercent: 0,
-          stagger: { amount: 0.2, from: 'end' },
           duration: 0.65,
           ease: 'osmo',
           overwrite: false
@@ -2046,6 +2254,12 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     // owns these properties right now and will itself revert to the new
     // restBg/restColor on its own next leave().
     if (activeLink) return;
+    // b156 — kill in-flight revert tweens first: closeNavForTransition's
+    // resetAllLinks() starts a 0.5s tween back to the OLD page's resting
+    // colour (Home's yellow), which kept running after this gsap.set and
+    // overwrote it, so the nav opened on the new page in the old colours.
+    gsap.killTweensOf([tileFill, tileCircle].filter(Boolean), 'backgroundColor');
+    gsap.killTweensOf(colorTargets, 'color');
     gsap.set(tileFill, { backgroundColor: restBg });
     if (tileCircle) gsap.set(tileCircle, { backgroundColor: restBg });
     colorTargets.forEach((el, i) => {
@@ -3103,11 +3317,12 @@ function prepareDisplayLargeReveal(scope) {
 // own reveal right here — in the very same onEnter callback as the
 // title's — rather than trusting two independently-created ScrollTriggers
 // to fire on the same tick, which isn't guaranteed.
+// b160 — trigger point 90% → 85%.
 function activateDisplayLargeReveal(prepared, linePrepared) {
   (prepared || []).forEach(({ trigger, splits, heroSection }) => {
     ScrollTrigger.create({
       trigger: trigger,
-      start: "top 90%",
+      start: "top 85%",
       once: true,
       onEnter: () => {
         const allLines = splits.flatMap(s => s.lines);
@@ -3282,7 +3497,7 @@ const IMAGE_REVEAL_RISE_REM = 1;
 function prepareImageReveal(scope) {
   if (typeof ScrollTrigger === "undefined") return [];
 
-  // b148 — also the Contact page's Webflow map widget (.contact__map): same
+  // b148 — also the Contact page's map (.contact__map): same
   // rise + fade-in as the images, without any parallax (it isn't a
   // [data-parallax] element, so initGlobalParallax leaves it alone).
   // b149 — and every .btn, so buttons reveal the same way.
@@ -3292,7 +3507,11 @@ function prepareImageReveal(scope) {
     // Same target resolution as initGlobalParallax (a '[data-parallax="target"]'
     // child if one exists, else the trigger itself), so this reveal and the
     // continuous parallax scrub always land on the identical element.
-    const el = trigger.querySelector('[data-parallax="target"]') || trigger;
+    // Slider visuals are the exception: Smooothy rewrites their transform
+    // every frame, so the rise goes on the image inside them instead.
+    const el = trigger.hasAttribute('data-parallax-inner')
+      ? (trigger.querySelector('.parallax-slider__item-img') || trigger)
+      : (trigger.querySelector('[data-parallax="target"]') || trigger);
     gsap.set(el, {
       opacity: 0,
       y: `${IMAGE_REVEAL_RISE_REM}rem`,
@@ -3302,19 +3521,60 @@ function prepareImageReveal(scope) {
   return prepared;
 }
 
+// Images (and buttons) entering the viewport together share one queue, so a
+// row of images reveals one after another instead of all at once. Based on
+// Osmo's Queued Scroll Reveal.
+const IMAGE_QUEUE_MAX = 12; // beyond this, extra items reveal immediately
+const IMAGE_QUEUE_DELAY = 0.1; // seconds between entering and the queue starting
+const IMAGE_QUEUE_STAGGER = 0.075; // seconds between each item starting
+
+let imageRevealQueue = [];
+let imageRevealRunning = false;
+let imageRevealCall = null;
+
+function revealImage(el) {
+  gsap.to(el, {
+    opacity: 1,
+    y: 0,
+    duration: DISPLAY_LARGE_ANIM.duration,
+    ease: DISPLAY_LARGE_ANIM.ease
+  });
+}
+
+function revealNextImage() {
+  const el = imageRevealQueue.shift();
+  if (!el) {
+    imageRevealRunning = false;
+    return;
+  }
+  revealImage(el);
+  imageRevealCall = gsap.delayedCall(IMAGE_QUEUE_STAGGER, revealNextImage);
+}
+
+function queueImageReveal(el) {
+  imageRevealQueue.push(el);
+  if (imageRevealQueue.length > IMAGE_QUEUE_MAX) revealImage(imageRevealQueue.shift());
+  if (imageRevealRunning) return;
+  imageRevealRunning = true;
+  imageRevealCall = gsap.delayedCall(IMAGE_QUEUE_DELAY, revealNextImage);
+}
+
 function activateImageReveal(prepared) {
+  // A fresh page starts with an empty queue.
+  if (imageRevealCall) imageRevealCall.kill();
+  imageRevealQueue = [];
+  imageRevealRunning = false;
+
   (prepared || []).forEach(({ el, trigger }) => {
     ScrollTrigger.create({
       trigger: trigger,
       start: 'top 90%',
       once: true,
       onEnter: () => {
-        gsap.to(el, {
-          opacity: 1,
-          y: 0,
-          duration: DISPLAY_LARGE_ANIM.duration,
-          ease: DISPLAY_LARGE_ANIM.ease
-        });
+        // Slides scrolled off-screen sideways would only clog the queue.
+        const rect = trigger.getBoundingClientRect();
+        if (rect.right < 0 || rect.left > window.innerWidth) revealImage(el);
+        else queueImageReveal(el);
       }
     });
   });
@@ -3507,7 +3767,7 @@ function revealCharsRollIn(el, opts) {
 }
 
 // Home's hero intro — heading text roll-in, menu label roll-in, logo
-// bounce-in. Originally cold-load only (via runPageOnceAnimation), never
+// bounce-in. Originally cold-load only (via playOnceAnimation), never
 // replayed on returning to Home via a Barba transition. To play it again
 // on return without a flash of fully-visible static text first, it's
 // split into two steps:
@@ -3524,7 +3784,7 @@ function revealCharsRollIn(el, opts) {
 //      something that's already finished playing off-screen.
 //
 // A true first load has no covered-transition window to hide behind, so
-// runPageOnceAnimation just calls both back-to-back immediately.
+// prepareOnceAnimation and playOnceAnimation call them either side of the preloader.
 // .nav__button-label lives in the persistent Global component (outside the
 // Barba container, never swapped between pages), but prepareLoadReveal
 // below SplitTexts it fresh every time Home is entered. Without reverting
@@ -3930,6 +4190,9 @@ function destroyParallaxImageSliders() {
 // center — not by Smooothy's internal parallaxValues, which were never a
 // reliable signal here (this instance's data-parallax-amount is 0, so
 // that value has no visible effect to have ever been exercised through).
+// Resting state for the decade description lines (matches [data-line-reveal]).
+const DECADE_HIDDEN = { opacity: 0, y: `${DISPLAY_LARGE_ANIM.travelEm}em` };
+
 function initDecadeTimelinePanels(scope, decadeKeys) {
   if (typeof SplitText === "undefined" || !decadeKeys.some(Boolean)) return null;
 
@@ -3937,8 +4200,8 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
   (scope || document).querySelectorAll('.slider__timeline__item').forEach(item => {
     const textEl = item.querySelector('[data-decade-text]');
     if (!item.id || !textEl) return;
-    const split = new SplitText(textEl, { type: "lines", mask: "lines" });
-    gsap.set(split.lines, { yPercent: 120 });
+    const split = new SplitText(textEl, { type: "lines" });
+    gsap.set(split.lines, DECADE_HIDDEN);
     gsap.set(item, { display: 'none' });
     panels.set(item.id, { item, split });
   });
@@ -3981,7 +4244,7 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
       panels.forEach((panel, panelId) => {
         if (panelId === id || panelId === prevId) return;
         gsap.killTweensOf(panel.split.lines);
-        gsap.set(panel.split.lines, { yPercent: 120 });
+        gsap.set(panel.split.lines, DECADE_HIDDEN);
         gsap.set(panel.item, { display: 'none' });
       });
 
@@ -3995,7 +4258,7 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
         // much time as the roll-in does.
         transitionTl
           .to(prev.split.lines, {
-            yPercent: 120,
+            ...DECADE_HIDDEN,
             duration: DECADE_OUT_DURATION,
             ease: "power2.in",
             stagger: { each: DECADE_OUT_STAGGER, from: "start" }
@@ -4007,10 +4270,11 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
       transitionTl
         .set(next.item, { display: '' })
         .to(next.split.lines, {
-          yPercent: 0,
-          duration: LINE_REVEAL_DURATION,
-          ease: "expo.out",
-          stagger: { each: LINE_REVEAL_STAGGER, from: "start" }
+          opacity: 1,
+          y: 0,
+          duration: DISPLAY_LARGE_ANIM.duration,
+          ease: DISPLAY_LARGE_ANIM.ease,
+          stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" }
         });
     }
   };
