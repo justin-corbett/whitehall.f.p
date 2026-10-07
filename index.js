@@ -99,7 +99,7 @@ gsap.defaults({ ease: "osmo", duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b193';
+const BUILD = 'b209';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -112,11 +112,6 @@ function hardResetNavChars() {
   if (!dbg) return;
   const allChars = (dbg.navLinkSplits || []).flatMap(s => s.chars);
   if (allChars.length) gsap.set(allChars, { yPercent: 100 });
-  if (dbg.linkConfigs) {
-    dbg.linkConfigs.forEach(entry => {
-      if (entry.cloneChars) gsap.set(entry.cloneChars, { yPercent: 0 });
-    });
-  }
 }
 
 // -----------------------------------------
@@ -800,9 +795,8 @@ function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, 
 // PRELOADER
 // -----------------------------------------
 
-// First visit only. Plays the Webflow Lottie for at least two and a half
-// seconds, then wipes the panel away bottom-up, the same way the menu panel
-// closes, while the Lottie drifts up and fades out with it. If the page has a
+// First visit only. Plays the Webflow Lottie for four seconds, then wipes the panel away bottom-up, the same way the
+// menu panel closes, while the Lottie drifts up and fades out with it. If the page has a
 // hero video it is already loading behind the panel, and the panel waits (up
 // to a limit) until it is playing. Resolves as the wipe nears its end so the
 // page intro can start with it. The markup is the Loader component;
@@ -810,7 +804,7 @@ function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, 
 const PRELOADER_KEY = 'wh-preloader-seen'; // timestamp of the last play; the head snippet reads it too
 const PRELOADER_EXPIRY = 24 * 60 * 60 * 1000; // plays again once a day
 const PRELOADER_FORCE = new URLSearchParams(location.search).has('preloader'); // ?preloader to test
-const PRELOADER_HOLD = 2.5; // minimum seconds the Lottie plays before the wipe
+const PRELOADER_HOLD = 4; // seconds the Lottie plays before the wipe
 const PRELOADER_VIDEO_MAX = 3; // longest the wipe waits for the hero video
 const PRELOADER_FADE = 0.3;
 const PRELOADER_LIFT = -200; // yPercent the Lottie is pulled up by the wipe
@@ -907,6 +901,7 @@ let heroTitleGroups = new Map();
 // b129 — simple fade transition (see runPageLeaveAnimation).
 const TRANSITION_FADE_OUT = 0.5;
 const TRANSITION_FADE_IN = 0.6;
+const NAV_LOGO_OUT = 0.2; // logo fade-out before its Lottie replays on a page transition
 const TRANSITION_BG_DURATION = 0.9;
 let pageBaseBg = null;
 let transitionNextBg = null;
@@ -1038,6 +1033,14 @@ function runPageLeaveAnimation(current, next) {
       duration: TRANSITION_FADE_OUT,
       ease: 'power1.out'
     }, 0);
+    // The logo drops out quickly and replays while the old page is still
+    // fading, rather than waiting for the new page.
+    tl.to('.nav__logo', {
+      autoAlpha: 0,
+      duration: NAV_LOGO_OUT,
+      ease: 'power1.out'
+    }, 0);
+    tl.call(revealNavLogo, null, NAV_LOGO_OUT);
   }
 }
 
@@ -1068,10 +1071,15 @@ async function runPageEnterAnimation(next){
     // prepared hero intro straight to its finished state rather than
     // playing the roll-in.
     if (pendingLoadReveal) {
-      const { allChars, menuChars, logo } = pendingLoadReveal;
-      if (allChars.length) gsap.set(allChars, { yPercent: 0 });
+      const { wordmark, menuChars, logo } = pendingLoadReveal;
+      gsap.set(wordmark, { autoAlpha: 1 });
+      const wordmarkAnim = getLottieIn(wordmark);
+      if (wordmarkAnim) wordmarkAnim.goToAndStop(wordmarkAnim.totalFrames - 1, true);
       if (menuChars) gsap.set(menuChars, { yPercent: 0 });
-      if (logo) gsap.set(logo, { autoAlpha: 1, y: 0, scale: 1 });
+      if (logo) {
+        gsap.set(logo, { autoAlpha: 1 });
+        finishNavLogo();
+      }
       pendingLoadReveal = null;
     }
     // b115 — matches prepareLineReveal's new resting state (opacity/y/filter),
@@ -1093,6 +1101,7 @@ async function runPageEnterAnimation(next){
     (pendingRuleReveals || []).forEach(el => gsap.set(el, { scaleX: 1 }));
     pendingRuleReveals = null;
     tl.set(next, { autoAlpha: 1 });
+    tl.call(() => { gsap.set('.nav__logo', { autoAlpha: 1 }); finishNavLogo(); });
     tl.add("pageReady")
     tl.call(resetPage, [next], "pageReady");
     return new Promise(resolve => tl.call(resolve, null, "pageReady"));
@@ -1110,6 +1119,8 @@ async function runPageEnterAnimation(next){
     } catch (err) {
     }
     pendingLoadReveal = null;
+    // Non-menu transitions already replayed the logo during the leave.
+    if (navWasOpenForTransition) revealNavLogo();
   }, null, "startEnter");
 
   tl.fromTo(next, { autoAlpha: 0 }, {
@@ -1351,6 +1362,12 @@ barba.hooks.afterEnter(data => {
   }
 });
 
+// CMS template pages don't carry the body attribute Barba needs; without it
+// barba.init throws, the wh-loading class is never cleared and no intro runs.
+if (!document.querySelector('[data-barba="wrapper"]')) {
+  document.body.setAttribute('data-barba', 'wrapper');
+}
+
 barba.init({
   debug: false,
   timeout: 7000,
@@ -1526,7 +1543,13 @@ function initBarbaNavUpdate(data) {
 function prepareLineReveal(scope) {
   if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
 
-  const targets = (scope || document).querySelectorAll('[data-line-reveal]');
+  // Rich text ([data-line-reveal-children], e.g. the legal pages' CMS body)
+  // reveals block by block: each paragraph, heading and list item gets its
+  // own line split and its own trigger, instead of splitting one huge node.
+  const richBlocks = [...(scope || document).querySelectorAll('[data-line-reveal-children]')]
+    .flatMap(rich => [...rich.children].flatMap(child => (/^(UL|OL)$/.test(child.tagName) ? [...child.children] : [child])))
+    .filter(block => block.textContent.trim());
+  const targets = [...(scope || document).querySelectorAll('[data-line-reveal]'), ...richBlocks];
   const prepared = [];
   // b147 — INLINE [data-line-reveal] pieces (display:inline, e.g. the "Send
   // your CV to / email link / and we'll get back to you" run on Contact,
@@ -1538,6 +1561,13 @@ function prepareLineReveal(scope) {
   // same rise + fade, once, and the inline children are left untouched.
   const inlineUnits = new Map();
   targets.forEach(el => {
+    // List items reveal as one unit: the bullet marker belongs to the <li>,
+    // not to its split lines, so it would otherwise sit there while the text
+    // animates.
+    if (el.tagName === 'LI') {
+      if (!inlineUnits.has(el)) inlineUnits.set(el, el.getAttribute('data-line-reveal-start') || 'top 85%');
+      return;
+    }
     if (getComputedStyle(el).display === 'inline') {
       let unit = el.parentElement;
       while (unit && getComputedStyle(unit).display === 'inline') unit = unit.parentElement;
@@ -1653,11 +1683,9 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
 
   tl.set([navUl, navBottom, navLogoText].filter(Boolean), { autoAlpha: 1 }, 0);
 
-  // Top-bar logo and "Menu" label fade out as soon as the panel opens.
-  if (navLogo) {
-    tl.to(navLogo, { autoAlpha: 0, duration: 0.3, ease: "power2.out" }, 0);
-  }
-
+  // "Menu" label fades out as soon as the panel opens (the top-bar logo is
+  // handled separately in openNav/closeNav, so a page transition can keep it
+  // hidden and replay its Lottie instead).
   if (menuLabel) {
     tl.to(menuLabel, { autoAlpha: 0, duration: 0.3, ease: "power2.in" }, 0);
   }
@@ -1830,18 +1858,6 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   const tileCap = navEl.querySelector('.nav__tile-cap');
   if (tileCap) tileCap.style.display = 'none';
 
-  // Roll-hover wraps below get an explicit pixel width baked in from a
-  // getBoundingClientRect() measurement, taken once here at first page
-  // load (this whole function only ever runs once, from
-  // initFullScreenNavigation via initOnceFunctions). If the custom
-  // webfont hasn't finished loading yet at that exact moment, the
-  // measurement is taken against the fallback font's (narrower) metrics
-  // — then the real font swaps in moments later, rendering wider, but
-  // the wrap's cached width never gets updated, so the now-wider text
-  // clips at both edges. Collected here so they can be re-measured once
-  // the real fonts are confirmed ready, below.
-  const rollWrapMeasurements = [];
-
   // Text + bottom logo mark + close icon all share the same color tween.
   const colorTargets = [
     ...navEl.querySelectorAll('.nav__link'),
@@ -1919,122 +1935,26 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       gsap.set(captionSplit.words, { yPercent: 110 });
     }
 
-    // Escapes' alt text ("Coming Soon") is only a source for the roll
-    // clone below now — hide the original element so it doesn't sit
-    // overlaid on "Escapes".
+    // Escapes' alt text ("Coming Soon") is no longer shown on hover.
     const altEl = link.querySelector('.nav__link-text-alt');
     if (altEl) gsap.set(altEl, { display: 'none' });
 
     // GSAP-driven underline, replacing [data-underline-link]'s CSS
     // pseudo-element for these links (GSAP can't tween ::before/::after
-    // directly). Skipped for Escapes — its roll clone already carries
-    // the hover weight, and the underline read as redundant.
-    let underline = null;
-    if (!altEl) {
-      underline = document.createElement('span');
-      underline.setAttribute('aria-hidden', 'true');
-      underline.style.cssText =
-        `position:absolute;bottom:-0.0625em;left:0;width:100%;height:max(${UNDERLINE_HEIGHT}, 1px);` +
-        'background-color:currentColor;pointer-events:none;';
-      if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
-      link.appendChild(underline);
-      gsap.set(underline, { scaleX: 0, transformOrigin: 'right' });
-    }
-
-    // Roll-hover clone: original line reused as-is (already split for
-    // the menu-open reveal), only the clone is newly created — normally
-    // a duplicate of the same text, but "Coming Soon" for Escapes.
-    const linkTextEl = link.querySelector('.nav__link-text:not(.nav__link-text-alt)');
-    const origSplit = originalSplitByLink.get(link);
-    let rollPairs = null;
-    let cloneChars = null;
-    if (origSplit && linkTextEl && linkTextEl.parentNode) {
-      const wrap = document.createElement('span');
-      wrap.style.cssText = 'display:inline-block;overflow:hidden;position:relative;vertical-align:top;';
-      linkTextEl.parentNode.insertBefore(wrap, linkTextEl);
-      wrap.appendChild(linkTextEl);   // normal flow for now, just to measure
-
-      const cloneLabel = altEl ? altEl.textContent.trim() : linkTextEl.textContent;
-
-      const cloneWrap = document.createElement('span');
-      cloneWrap.setAttribute('aria-hidden', 'true');
-      cloneWrap.style.cssText = 'white-space:nowrap;';
-      cloneWrap.textContent = cloneLabel;
-      wrap.appendChild(cloneWrap);   // also normal flow for now, just to measure
-
-      // Explicit measured width (not CSS auto-sizing) — both lines are
-      // centered independently via absolute positioning inside it.
-      const origWidth = linkTextEl.getBoundingClientRect().width;
-      const origHeight = linkTextEl.getBoundingClientRect().height;
-      const cloneWidth = cloneWrap.getBoundingClientRect().width;
-      wrap.style.width = Math.max(origWidth, cloneWidth) + 'px';
-      // Height too — both lines go position:absolute below and would
-      // otherwise contribute nothing to wrap's own height.
-      wrap.style.height = origHeight + 'px';
-      rollWrapMeasurements.push({ wrap, linkTextEl, cloneWrap });
-
-      linkTextEl.style.cssText += 'position:absolute;top:0;left:50%;';
-      gsap.set(linkTextEl, { xPercent: -50 });
-
-      cloneWrap.style.cssText += 'position:absolute;top:0;left:50%;';
-
-      // The clone's characters are built by hand — one <span> per
-      // character straight from the known-correct source string, in
-      // guaranteed left-to-right order, rather than via a second
-      // SplitText({type:'chars'}) call, whose whitespace handling proved
-      // inconsistent from link to link (e.g. "Our Story" -> "OU RSTORY").
-      // A literal space character in its own inline-block span can
-      // collapse to zero width, so a non-breaking space stands in for it.
-      cloneWrap.textContent = '';
-      cloneChars = Array.from(cloneLabel).map(ch => {
-        const charEl = document.createElement('span');
-        charEl.className = 'nav-char';
-        charEl.style.display = 'inline-block';
-        charEl.textContent = ch === ' ' ? ' ' : ch;
-        cloneWrap.appendChild(charEl);
-        return charEl;
-      });
-      gsap.set(cloneWrap, { xPercent: -50, yPercent: 100 });
-
-      // Diagnostic only — logs the actual rendered reading order for both
-      // the clone and the original straight after the split, to catch a
-      // char-order regression early.
-
-      // Paired index-by-index up to the LONGER of the two (Escapes vs.
-      // Coming Soon differ in length) so no extra clone chars are left
-      // out of the animation.
-      const maxLen = Math.max(origSplit.chars.length, cloneChars.length);
-      const pairs = [];
-      for (let i = 0; i < maxLen; i++) {
-        if (origSplit.chars[i]) pairs.push(origSplit.chars[i]);
-        if (cloneChars[i]) pairs.push(cloneChars[i]);
-      }
-      rollPairs = pairs;
-    }
+    // directly).
+    const underline = document.createElement('span');
+    underline.setAttribute('aria-hidden', 'true');
+    underline.style.cssText =
+      `position:absolute;bottom:-0.0625em;left:0;width:100%;height:max(${UNDERLINE_HEIGHT}, 1px);` +
+      'background-color:currentColor;pointer-events:none;';
+    if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
+    link.appendChild(underline);
+    gsap.set(underline, { scaleX: 0, transformOrigin: 'right' });
 
     linkConfigs.set(link, {
-      config, image, caption, captionSplit, originalSplit: origSplit, underline, rollPairs,
-      // Tracked separately from rollPairs (which mixes orig + clone chars)
-      // so a skipped-roll close (see leave()'s skipRoll) can still force
-      // just the clone back to its hidden position — see that comment for
-      // why this is necessary even though navTimeline "owns" the reset.
-      cloneChars
+      config, image, caption, captionSplit, underline
     });
   });
-
-  // Re-measure once the real webfonts are confirmed loaded (see comment
-  // where rollWrapMeasurements is declared above) — corrects any wrap
-  // whose width was baked in against fallback-font metrics.
-  if (rollWrapMeasurements.length && typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => {
-      rollWrapMeasurements.forEach(({ wrap, linkTextEl, cloneWrap }) => {
-        const w = Math.max(linkTextEl.getBoundingClientRect().width, cloneWrap.getBoundingClientRect().width);
-        const h = linkTextEl.getBoundingClientRect().height;
-        if (w) wrap.style.width = w + 'px';
-        if (h) wrap.style.height = h + 'px';
-      });
-    });
-  }
 
   let activeLink = null;
   let imageRevealTimer = null;
@@ -2043,16 +1963,11 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const entry = linkConfigs.get(link);
     if (!entry) return;
     activeLink = link;
-    // Diagnostic only — re-checks the clone's DOM reading order at the
-    // actual moment of hover, to compare against the build-time log.
-    if (entry.cloneChars) {
-    }
     gsap.to(tileFill, { backgroundColor: entry.config.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
     if (tileCircle) gsap.to(tileCircle, { backgroundColor: entry.config.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
     gsap.to(colorTargets, { color: entry.config.color, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
 
-    // Underline grows in, delayed to start once the char-shuffle's exit
-    // phase has finished.
+    // Underline grows in.
     if (entry.underline) {
       gsap.killTweensOf(entry.underline);
       gsap.set(entry.underline, { transformOrigin: 'left' });
@@ -2062,25 +1977,6 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         ease: 'osmo',
         delay: NAV_UNDERLINE_DELAY,
         overwrite: 'auto'
-      });
-    }
-
-    // Roll hover — original exits upward, clone rises into place below.
-    // entry.rollPairs includes the SAME .nav-char elements the shared
-    // navTimeline drives for the menu's own open/close reveal (origSplit
-    // is the split already built for that reveal, reused here rather than
-    // re-split). Only our own previous hover tween is ever killed here
-    // (tracked per-entry, not a blanket overwrite) — an overwrite that
-    // reached into navTimeline's own child tween for these chars would
-    // make navTimeline permanently lose control of them.
-    if (entry.rollPairs) {
-      if (entry.rollTween) entry.rollTween.kill();
-      entry.rollTween = gsap.to(entry.rollPairs, {
-        // b155 — whole line rolls together (no per-char stagger)
-        yPercent: -100,
-        duration: 0.65,
-        ease: 'osmo',
-        overwrite: false
       });
     }
 
@@ -2134,37 +2030,6 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         overwrite: 'auto'
       });
     }
-    // Skipped on menu close (opts.skipRoll, set by resetAllLinks below) —
-    // navTimeline's own reverse() already puts the ORIGINAL chars back to
-    // hidden, so animating entry.rollPairs here would just stack on top of
-    // that. But rollPairs also includes the CLONE chars (the roll-hover's
-    // duplicate word), which navTimeline never touches at all — so those
-    // still need an explicit, unanimated reset here (the menu is
-    // closing/covered anyway), or the clone would be left sitting fully
-    // revealed the next time this nav item's menu opens.
-    if (entry.rollPairs) {
-      if (opts && opts.skipRoll) {
-        if (entry.rollTween) entry.rollTween.kill();
-        if (entry.cloneChars) gsap.set(entry.cloneChars, { yPercent: 0 });
-        // b132 — the hovered link's ORIGINAL chars were rolled up to -100 by
-        // the hover tween (clone showing in their place). Killing the tween
-        // and resetting only the clone left BOTH hidden — the label vanished
-        // the instant a click/close reset the hover state, and only came
-        // back on the next hover. Put the originals back to their open-menu
-        // resting position (0) at the same moment, so the swap is invisible
-        // (same word, same spot) and the menu's own reverse then slides them
-        // away normally.
-        if (activeLink === link && entry.originalSplit) gsap.set(entry.originalSplit.chars, { yPercent: 0 });
-      } else {
-        if (entry.rollTween) entry.rollTween.kill();
-        entry.rollTween = gsap.to(entry.rollPairs, {
-          yPercent: 0,
-          duration: 0.65,
-          ease: 'osmo',
-          overwrite: false
-        });
-      }
-    }
     if (entry.image) {
       gsap.killTweensOf(entry.image);
       gsap.to(entry.image, { clipPath: 'inset(100% 0% 0% 0%)', scale: 1.05, duration: 0.5, ease: 'power2.in' });
@@ -2213,16 +2078,16 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       // cleanup does, but still let the color settle back to default
       // since the menu really is closing in that case.
       const isNavActive = navEl.getAttribute('data-navigation-status') === 'active';
-      leave(link, { skipRoll: !isNavActive });
+      leave(link);
     });
   });
 
   // Closing the menu without a genuine mouseleave (close button, Escape,
   // background click) would otherwise leave the last-hovered link's
-  // state stuck. skipRoll:true — see leave()'s own note.
+  // state stuck.
   function resetAllLinks(opts) {
     const keepColors = !!(opts && opts.keepColors);
-    linkConfigs.forEach((entry, link) => leave(link, { skipRoll: true, keepColors }));
+    linkConfigs.forEach((entry, link) => leave(link, { keepColors }));
     activeLink = null;
   }
 
@@ -2268,9 +2133,6 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
   }
   updateNavRestingColors();
 
-  // Diagnostic only — exposes linkConfigs (rollTween/cloneChars per link)
-  // so  can inspect hover-roll state alongside
-  // navTimeline's own char state.
   return { resetAllLinks, linkConfigs, updateNavRestingColors };
 }
 
@@ -2298,6 +2160,53 @@ function initNavButtonCursorClose(navEl) {
   }
 
   return { dimCloseIcon, undimCloseIcon };
+}
+
+// -----------------------------------------
+// NAV LOGO (Lottie)
+// -----------------------------------------
+
+// The logo is a Webflow Lottie in .nav__logo. Its fills follow currentColor
+// (site head CSS), so the colour zones still tint it through .nav__logo's
+// own colour. It draws itself in on load and again each time the bar
+// returns on scroll up, then rests on frame 0 (blank) while hidden.
+function getLottieIn(el) {
+  const lottie = Webflow.require('lottie')?.lottie;
+  if (!lottie || !el) return null;
+  return lottie.getRegisteredAnimations().find(anim => el.contains(anim.wrapper)) || null;
+}
+
+function getNavLogoLottie() {
+  return getLottieIn(document.querySelector('.logo__main__lottie'));
+}
+
+function resetNavLogo() {
+  const anim = getNavLogoLottie();
+  if (!anim) return;
+  anim.loop = false;
+  anim.goToAndStop(0, true);
+}
+
+function playNavLogo() {
+  const anim = getNavLogoLottie();
+  if (!anim) return;
+  anim.loop = false;
+  anim.setDirection(1);
+  anim.goToAndPlay(0, true);
+}
+
+// Shows the logo and draws it in from the start — the page transition's
+// version of the intro.
+function revealNavLogo() {
+  const logo = document.querySelector('.nav__logo');
+  if (!logo) return;
+  gsap.set(logo, { autoAlpha: 1 });
+  playNavLogo();
+}
+
+function finishNavLogo() {
+  const anim = getNavLogoLottie();
+  if (anim) anim.goToAndStop(anim.totalFrames - 1, true);
 }
 
 // -----------------------------------------
@@ -2329,12 +2238,16 @@ function initNavAutoHide() {
   function setVisible(next) {
     if (visible === next) return;
     visible = next;
+    if (next) playNavLogo();
     gsap.to(navBar, {
       opacity: next ? 1 : 0,
       duration: 0.4,
       ease: 'power2.out',
       overwrite: true,
-      onComplete: () => { navBar.style.pointerEvents = next ? 'auto' : 'none'; }
+      onComplete: () => {
+        navBar.style.pointerEvents = next ? 'auto' : 'none';
+        if (!next) resetNavLogo();
+      }
     });
   }
 
@@ -2393,7 +2306,8 @@ function initFullScreenNavigation() {
 
   const navLinkSplits = typeof SplitText !== "undefined"
     ? navLinkTextEls.map(el => new SplitText(el, {
-        type: "words,chars",
+        type: "lines,words,chars",
+        mask: "lines",
         charsClass: "nav-char",
         reduceWhiteSpace: false
       }))
@@ -2449,6 +2363,7 @@ function initFullScreenNavigation() {
     if (navTile) navTile.style.pointerEvents = '';
     navEl.setAttribute('data-navigation-status', 'active');
     if (lenis && typeof lenis.stop === "function") lenis.stop();
+    if (navLogo) gsap.to(navLogo, { autoAlpha: 0, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
     navTimeline.timeScale(OPEN_SPEED).play();
   }
 
@@ -2466,6 +2381,17 @@ function initFullScreenNavigation() {
     if (navTile) navTile.style.pointerEvents = 'none';
     resetLinkHovers({ keepColors: keepColors === true });
     navEl.setAttribute('data-navigation-status', 'not-active');
+    // A close for a page transition leaves the logo hidden; the incoming
+    // page plays it in (see revealNavLogo).
+    if (navLogo && keepColors !== true) {
+      gsap.to(navLogo, {
+        autoAlpha: 1,
+        duration: 0.3,
+        ease: 'power2.out',
+        delay: Math.max(0, navTimeline.duration() / CLOSE_SPEED - 0.3),
+        overwrite: 'auto'
+      });
+    }
     navTimeline.timeScale(CLOSE_SPEED).reverse();
   }
 
@@ -3221,7 +3147,7 @@ function initGlobalParallax(scope) {
 const DISPLAY_LARGE_ANIM = {
   travelEm: 0.5,
   // b129 — rise for the big hero headings only (they're 144-160px, so 0.5em = 72-80px, far more than body text). Before b128 the hero's rise was converted too early on a fresh load and came out ~1px, so refresh looked subtle while Barba showed the full 0.5em. Tune this one number.
-  headingTravelEm: 0.15,
+  headingTravelEm: 0.2,
   blurPx: 0, // b134 — blur removed from all text/image/sticker reveals (no filter is applied any more)
   duration: 0.7,
   stagger: 0.018,
@@ -3541,19 +3467,34 @@ function revealImage(el) {
   });
 }
 
+// Triggers fire in whatever order their own start positions are crossed, so
+// side-by-side images that sit at slightly different heights (or are nudged
+// by parallax) can arrive right-first. Each pick takes the top-most row, and
+// the left-most image within it.
+const IMAGE_ROW_TOLERANCE = 80; // px — images this close vertically count as one row
+
+function takeNextImage() {
+  imageRevealQueue.sort((a, b) => {
+    const ra = a.trigger.getBoundingClientRect();
+    const rb = b.trigger.getBoundingClientRect();
+    return Math.abs(ra.top - rb.top) > IMAGE_ROW_TOLERANCE ? ra.top - rb.top : ra.left - rb.left;
+  });
+  return imageRevealQueue.shift();
+}
+
 function revealNextImage() {
-  const el = imageRevealQueue.shift();
-  if (!el) {
+  const next = takeNextImage();
+  if (!next) {
     imageRevealRunning = false;
     return;
   }
-  revealImage(el);
+  revealImage(next.el);
   imageRevealCall = gsap.delayedCall(IMAGE_QUEUE_STAGGER, revealNextImage);
 }
 
-function queueImageReveal(el) {
-  imageRevealQueue.push(el);
-  if (imageRevealQueue.length > IMAGE_QUEUE_MAX) revealImage(imageRevealQueue.shift());
+function queueImageReveal(el, trigger) {
+  imageRevealQueue.push({ el, trigger });
+  if (imageRevealQueue.length > IMAGE_QUEUE_MAX) revealImage(takeNextImage().el);
   if (imageRevealRunning) return;
   imageRevealRunning = true;
   imageRevealCall = gsap.delayedCall(IMAGE_QUEUE_DELAY, revealNextImage);
@@ -3574,7 +3515,7 @@ function activateImageReveal(prepared) {
         // Slides scrolled off-screen sideways would only clog the queue.
         const rect = trigger.getBoundingClientRect();
         if (rect.right < 0 || rect.left > window.innerWidth) revealImage(el);
-        else queueImageReveal(el);
+        else queueImageReveal(el, trigger);
       }
     });
   });
@@ -3766,13 +3707,12 @@ function revealCharsRollIn(el, opts) {
   return { split, tween };
 }
 
-// Home's hero intro — heading text roll-in, menu label roll-in, logo
-// bounce-in. Originally cold-load only (via playOnceAnimation), never
+// Home's hero intro — wordmark Lottie, menu label roll-in, logo Lottie. Originally cold-load only (via playOnceAnimation), never
 // replayed on returning to Home via a Barba transition. To play it again
 // on return without a flash of fully-visible static text first, it's
 // split into two steps:
 //
-//   1. prepareLoadReveal — SplitText the heading/menu text and set
+//   1. prepareLoadReveal — hide the wordmark, SplitText the menu text and set
 //      everything to its hidden starting state. Safe to run any time,
 //      including well before the page is visible — called from the leave
 //      timeline's onComplete (screen still fully covered by the
@@ -3795,6 +3735,9 @@ function revealCharsRollIn(el, opts) {
 // it before re-splitting.
 let activeMenuLabelSplit = null;
 
+// How far through the wordmark Lottie the menu label and logo begin (0-1).
+const HERO_CHROME_START = 0.1;
+
 function prepareLoadReveal(scope, opts) {
   const root = scope || document;
   // b139 — on a Barba navigation the logo + menu label stay put (no hide /
@@ -3805,52 +3748,16 @@ function prepareLoadReveal(scope, opts) {
   // Persistent chrome — outside the Barba container, queried from document.
   const logo = withChrome ? document.querySelector('.nav__logo') : null;
   const menuLabel = withChrome ? document.querySelector('.nav__button-label') : null;
-  const videoTexts = Array.from(root.querySelectorAll('.video-section__text'));
+  const wordmark = root.querySelector('.hero__wordmark__lottie');
 
-  // Nothing to reveal on this page — no intro to prepare or play.
-  if (!videoTexts.length) return null;
+  // Pages without a hero wordmark still get the logo + menu label intro on a
+  // first load; Barba navigations (no chrome) have nothing to prepare.
+  if (!wordmark && !withChrome) return null;
 
   const HERO_ROLL = { duration: 0.9, stagger: 0.04, ease: 'osmo' };
-  const START_DELAY = 0.15;
 
-  // "WhitehalL" and the smaller "F.p." are separate DOM elements
-  // (different size/line-height, so each needs its own SplitText), but
-  // animated as one continuous stagger across both, so F.p. reads as the
-  // last 4 characters of the large word rather than a second reveal.
-  const largeEls = videoTexts.filter(el => !el.classList.contains('is-small'));
-  const smallEls = videoTexts.filter(el => el.classList.contains('is-small'));
-
-  // The site's line-height:1 leaves no room for "p"'s descender in a
-  // mask — loosened here for the small text only, right before splitting.
-  smallEls.forEach(el => { el.style.lineHeight = '1.2'; });
-
-  // Logo/menu text are timed to finish when the LARGE heading finishes
-  // (not the combined large+small total, since "F.p." keeps going after it).
-  let largeFinishTime = START_DELAY;
-
-  const largeChars = largeEls.flatMap(el => {
-    const split = new SplitText(el, { type: 'lines,chars', mask: 'lines', reduceWhiteSpace: false });
-    return split.chars;
-  });
-  if (largeChars.length) {
-    largeFinishTime = START_DELAY + (largeChars.length - 1) * HERO_ROLL.stagger + HERO_ROLL.duration;
-  }
-  const smallChars = smallEls.flatMap(el => {
-    const split = new SplitText(el, { type: 'lines,chars', mask: 'lines', reduceWhiteSpace: false });
-    return split.chars;
-  });
-
-  // DOM order (large then small), one continuous stagger index.
-  const allChars = [...largeChars, ...smallChars];
-  if (allChars.length) gsap.set(allChars, { yPercent: 100 });
-
-  // Logo/menu duration computed backward from largeFinishTime so all
-  // three (heading, logo, menu text) land together.
-  const menuCharCount = menuLabel ? (menuLabel.textContent || '').trim().length : 0;
-  const chromeDuration = menuCharCount
-    ? (menuCharCount - 1) * HERO_ROLL.stagger + HERO_ROLL.duration
-    : 0.6;
-  const chromeDelay = Math.max(0, largeFinishTime - chromeDuration);
+  // Hidden until the Lottie is ready to play from its first frame.
+  if (wordmark) gsap.set(wordmark, { autoAlpha: 0 });
 
   let menuChars = null;
   if (menuLabel && typeof SplitText !== "undefined") {
@@ -3868,40 +3775,54 @@ function prepareLoadReveal(scope, opts) {
   }
 
   if (logo) {
-    // Same bounce-in as the nav's secondary logo mark on menu open.
-    gsap.set(logo, { autoAlpha: 0, y: 16, scale: 0.7 });
+    gsap.set(logo, { autoAlpha: 0 });
+    resetNavLogo();
   }
 
-  return { allChars, HERO_ROLL, START_DELAY, menuChars, chromeDuration, chromeDelay, logo };
+  return { wordmark, HERO_ROLL, menuChars, logo };
 }
 
 function playLoadReveal(state) {
   if (!state) return;
-  const { allChars, HERO_ROLL, START_DELAY, menuChars, chromeDuration, chromeDelay, logo } = state;
+  const { wordmark, HERO_ROLL, menuChars, logo } = state;
 
-  if (allChars.length) {
-    gsap.to(allChars, {
-      yPercent: 0,
-      duration: HERO_ROLL.duration,
-      ease: HERO_ROLL.ease,
-      stagger: { each: HERO_ROLL.stagger, from: 'start' },
-      delay: START_DELAY
-    });
-  }
+  Webflow.push(() => {
+    const anim = wordmark ? getLottieIn(wordmark) : null;
 
-  if (menuChars) {
-    gsap.to(menuChars, {
-      yPercent: 0,
-      duration: HERO_ROLL.duration,
-      ease: HERO_ROLL.ease,
-      stagger: { each: HERO_ROLL.stagger, from: 'start' },
-      delay: chromeDelay
-    });
-  }
+    const start = () => {
+      if (wordmark) gsap.set(wordmark, { autoAlpha: 1 });
+      let duration = 0;
+      if (anim) {
+        anim.loop = false;
+        anim.setDirection(1);
+        anim.goToAndPlay(0, true);
+        duration = anim.getDuration();
+      }
 
-  if (logo) {
-    gsap.to(logo, { autoAlpha: 1, y: 0, scale: 1, duration: chromeDuration, ease: 'back.out(1.7)', delay: chromeDelay });
-  }
+      // Menu label and logo start part-way through the wordmark.
+      const chromeDelay = wordmark ? duration * HERO_CHROME_START : 0.15;
+
+      if (menuChars) {
+        gsap.to(menuChars, {
+          yPercent: 0,
+          duration: HERO_ROLL.duration,
+          ease: HERO_ROLL.ease,
+          stagger: { each: HERO_ROLL.stagger, from: 'start' },
+          delay: chromeDelay
+        });
+      }
+
+      if (logo) {
+        gsap.delayedCall(chromeDelay, () => {
+          gsap.set(logo, { autoAlpha: 1 });
+          playNavLogo();
+        });
+      }
+    };
+
+    if (!wordmark || !anim || anim.isLoaded) start();
+    else anim.addEventListener('DOMLoaded', start);
+  });
 }
 
 // -----------------------------------------
