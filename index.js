@@ -99,7 +99,7 @@ gsap.defaults({ ease: "osmo", duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b209';
+const BUILD = 'b217';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -804,9 +804,10 @@ function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, 
 const PRELOADER_KEY = 'wh-preloader-seen'; // timestamp of the last play; the head snippet reads it too
 const PRELOADER_EXPIRY = 24 * 60 * 60 * 1000; // plays again once a day
 const PRELOADER_FORCE = new URLSearchParams(location.search).has('preloader'); // ?preloader to test
-const PRELOADER_HOLD = 4; // seconds the Lottie plays before the wipe
+const PRELOADER_HOLD = 2.75; // seconds the Lottie plays before the wipe
 const PRELOADER_VIDEO_MAX = 3; // longest the wipe waits for the hero video
 const PRELOADER_FADE = 0.3;
+const PRELOADER_FADE_AT = 2.6; // seconds in when the Lottie starts fading, ahead of the wipe
 const PRELOADER_LIFT = -200; // yPercent the Lottie is pulled up by the wipe
 const PRELOADER_WIPE = { duration: 0.9, ease: 'osmo' };
 const PRELOADER_INTRO_AT = 0.5; // seconds into the wipe when the page intro starts (the ease is visually done by then)
@@ -852,12 +853,14 @@ async function runPreloader(container) {
 
   await new Promise(resolve => Webflow.push(resolve));
   getPreloaderLottie(preloader)?.goToAndPlay(0, true);
+  const lottieEl = preloader.querySelector('[data-preloader-lottie]');
+  gsap.delayedCall(PRELOADER_FADE_AT, () => {
+    gsap.to(lottieEl, { autoAlpha: 0, duration: PRELOADER_FADE, ease: 'power1.out' });
+  });
   await Promise.all([waitSeconds(PRELOADER_HOLD), waitForHeroVideo(container)]);
 
-  const lottieEl = preloader.querySelector('[data-preloader-lottie]');
   await new Promise(resolve => {
     const tl = gsap.timeline({ onComplete: () => preloader.remove() });
-    tl.to(lottieEl, { autoAlpha: 0, duration: PRELOADER_FADE, ease: 'power1.out' }, 0);
     tl.to(lottieEl, { yPercent: PRELOADER_LIFT, ...PRELOADER_WIPE }, 0);
     tl.to(preloader, { clipPath: 'inset(0% 0% 100% 0%)', ...PRELOADER_WIPE }, 0);
     tl.call(resolve, null, PRELOADER_INTRO_AT);
@@ -1549,6 +1552,8 @@ function prepareLineReveal(scope) {
   const richBlocks = [...(scope || document).querySelectorAll('[data-line-reveal-children]')]
     .flatMap(rich => [...rich.children].flatMap(child => (/^(UL|OL)$/.test(child.tagName) ? [...child.children] : [child])))
     .filter(block => block.textContent.trim());
+  const richSet = new Set(richBlocks);
+  const defaultStart = el => el.getAttribute('data-line-reveal-start') || (richSet.has(el) ? 'top 90%' : 'top 85%');
   const targets = [...(scope || document).querySelectorAll('[data-line-reveal]'), ...richBlocks];
   const prepared = [];
   // b147 — INLINE [data-line-reveal] pieces (display:inline, e.g. the "Send
@@ -1565,7 +1570,7 @@ function prepareLineReveal(scope) {
     // not to its split lines, so it would otherwise sit there while the text
     // animates.
     if (el.tagName === 'LI') {
-      if (!inlineUnits.has(el)) inlineUnits.set(el, el.getAttribute('data-line-reveal-start') || 'top 85%');
+      if (!inlineUnits.has(el)) inlineUnits.set(el, defaultStart(el));
       return;
     }
     if (getComputedStyle(el).display === 'inline') {
@@ -1588,7 +1593,7 @@ function prepareLineReveal(scope) {
     // Per-element override — e.g. footer links set data-line-reveal-start="top 100%"
     // so they trigger right as they reach the viewport, instead of the
     // page-wide default of "top 90%".
-    const start = el.getAttribute('data-line-reveal-start') || 'top 85%';
+    const start = defaultStart(el);
 
     // The hero's own intro paragraph ([data-line-reveal] living inside the
     // hero's .section__hero__content) is tagged with that section here IF
@@ -1935,24 +1940,57 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       gsap.set(captionSplit.words, { yPercent: 110 });
     }
 
-    // Escapes' alt text ("Coming Soon") is no longer shown on hover.
+    // Escapes' alt text ("Coming Soon") rolls in over the link text on hover.
+    // The alt element itself stays hidden and only supplies the words; a
+    // masked, absolutely positioned copy styled like the main text does the
+    // rolling so the link keeps its original width.
     const altEl = link.querySelector('.nav__link-text-alt');
     if (altEl) gsap.set(altEl, { display: 'none' });
+    let swap = null;
+    const origSplit = originalSplitByLink.get(link);
+    const mainText = link.querySelector('.nav__link-text:not(.nav__link-text-alt)');
+    if (altEl && origSplit && mainText && typeof SplitText !== "undefined") {
+      const cs = getComputedStyle(mainText);
+      const altCopy = document.createElement('span');
+      altCopy.setAttribute('aria-hidden', 'true');
+      altCopy.textContent = altEl.textContent.trim();
+      altCopy.style.cssText =
+        'position:absolute;left:0;top:0;white-space:nowrap;pointer-events:none;' +
+        `font-family:${cs.fontFamily};font-size:${cs.fontSize};font-weight:${cs.fontWeight};` +
+        `letter-spacing:${cs.letterSpacing};line-height:${cs.lineHeight};text-transform:${cs.textTransform};`;
+      if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
+      link.appendChild(altCopy);
+      const altSplit = new SplitText(altCopy, { type: 'lines', mask: 'lines', reduceWhiteSpace: false });
+      gsap.set(altSplit.lines, { yPercent: 110 });
+      // Centre the copy over the main text (measured on hover, layout can change).
+      const place = () => {
+        const linkBox = link.getBoundingClientRect();
+        const mainBox = mainText.getBoundingClientRect();
+        const altBox = altCopy.getBoundingClientRect();
+        altCopy.style.left = `${mainBox.left - linkBox.left + (mainBox.width - altBox.width) / 2}px`;
+        altCopy.style.top = `${mainBox.top - linkBox.top + (mainBox.height - altBox.height) / 2}px`;
+      };
+      swap = { origLines: origSplit.lines, altLines: altSplit.lines, place, active: false };
+    }
 
     // GSAP-driven underline, replacing [data-underline-link]'s CSS
     // pseudo-element for these links (GSAP can't tween ::before/::after
     // directly).
-    const underline = document.createElement('span');
-    underline.setAttribute('aria-hidden', 'true');
-    underline.style.cssText =
-      `position:absolute;bottom:-0.0625em;left:0;width:100%;height:max(${UNDERLINE_HEIGHT}, 1px);` +
-      'background-color:currentColor;pointer-events:none;';
-    if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
-    link.appendChild(underline);
-    gsap.set(underline, { scaleX: 0, transformOrigin: 'right' });
+    // Escapes swaps to "Coming Soon" instead of underlining.
+    let underline = null;
+    if (!swap) {
+      underline = document.createElement('span');
+      underline.setAttribute('aria-hidden', 'true');
+      underline.style.cssText =
+        `position:absolute;bottom:-0.0625em;left:0;width:100%;height:max(${UNDERLINE_HEIGHT}, 1px);` +
+        'background-color:currentColor;pointer-events:none;';
+      if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
+      link.appendChild(underline);
+      gsap.set(underline, { scaleX: 0, transformOrigin: 'right' });
+    }
 
     linkConfigs.set(link, {
-      config, image, caption, captionSplit, underline
+      config, image, caption, captionSplit, underline, swap
     });
   });
 
@@ -1978,6 +2016,14 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         delay: NAV_UNDERLINE_DELAY,
         overwrite: 'auto'
       });
+    }
+
+    if (entry.swap) {
+      const { origLines, altLines, place } = entry.swap;
+      entry.swap.active = true;
+      place();
+      gsap.to(origLines, { yPercent: -110, duration: 0.6, ease: 'osmo', overwrite: 'auto' });
+      gsap.to(altLines, { yPercent: 0, duration: 0.6, ease: 'osmo', delay: 0.05, overwrite: 'auto' });
     }
 
     // Hover-intent delay — a quick flick through links shouldn't start
@@ -2029,6 +2075,12 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         ease: 'osmo',
         overwrite: 'auto'
       });
+    }
+    if (entry.swap && entry.swap.active) {
+      const { origLines, altLines } = entry.swap;
+      entry.swap.active = false;
+      gsap.to(altLines, { yPercent: 110, duration: 0.5, ease: 'osmo', overwrite: 'auto' });
+      gsap.to(origLines, { yPercent: 0, duration: 0.5, ease: 'osmo', delay: 0.05, overwrite: 'auto' });
     }
     if (entry.image) {
       gsap.killTweensOf(entry.image);
