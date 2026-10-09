@@ -99,7 +99,7 @@ gsap.defaults({ ease: "osmo", duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b218';
+const BUILD = 'b222';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -355,6 +355,7 @@ function preloadHomeHeroVideo() {
         // Lazy mode would wait for the player to scroll into view; here we
         // want it to start buffering now.
         player.setAttribute('data-player-lazy', 'false');
+        player.setAttribute('data-bunny-preload', '');
         // Own wrapper, so initBunnyPlayerBackground's scope never touches
         // other players already sitting in the park host.
         const holder = document.createElement('div');
@@ -1681,7 +1682,24 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   const bottomLines = bottomSecondarySplits.flatMap(s => s.lines);
   gsap.set([...topLines, ...bottomLines], { yPercent: 100 });
   // Same starting state as the page transition's logo bounce-in.
-  if (navLogoSecondary) gsap.set(navLogoSecondary, { autoAlpha: 0, y: 16, scale: 0.7 });
+  // The secondary logo is a Lottie in newer builds of the nav: it draws
+  // itself in as part of the open animation. Without one it keeps the old
+  // bounce.
+  const secondaryHasLottie = !!(navLogoSecondary && navLogoSecondary.querySelector('[data-animation-type="lottie"]'));
+  const resetSecondaryLogo = () => {
+    const anim = getLottieIn(navLogoSecondary);
+    if (!anim) return;
+    anim.loop = false;
+    anim.goToAndStop(0, true);
+  };
+  if (navLogoSecondary) {
+    if (secondaryHasLottie) {
+      gsap.set(navLogoSecondary, { autoAlpha: 0 });
+      Webflow.push(resetSecondaryLogo);
+    } else {
+      gsap.set(navLogoSecondary, { autoAlpha: 0, y: 16, scale: 0.7 });
+    }
+  }
   if (closeIcon) gsap.set(closeIcon, { autoAlpha: 0, y: 16, scale: 0.7 });
 
   const tl = gsap.timeline({ paused: true });
@@ -1739,7 +1757,27 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   tl.call(() => { if (onReady) onReady(); }, null, "linksDone");
 
   // Secondary logo mark — bounces in over the tail of the main links.
-  if (navLogoSecondary) {
+  if (navLogoSecondary && secondaryHasLottie) {
+    tl.set(navLogoSecondary, { autoAlpha: 1 }, "linksDone-=0.3");
+    tl.call(() => {
+      if (tl.reversed()) { resetSecondaryLogo(); return; }
+      // The menu is display:none until it opens, so Webflow may not have
+      // created this Lottie yet — wait (briefly) for it to register and load.
+      const started = performance.now();
+      const tryPlay = () => {
+        if (tl.reversed() || tl.progress() === 0) return;
+        const anim = getLottieIn(navLogoSecondary);
+        if (anim && anim.isLoaded) {
+          anim.loop = false;
+          anim.setDirection(1);
+          anim.goToAndPlay(0, true);
+        } else if (performance.now() - started < 3000) {
+          requestAnimationFrame(tryPlay);
+        }
+      };
+      tryPlay();
+    }, null, "linksDone-=0.3");
+  } else if (navLogoSecondary) {
     tl.to(navLogoSecondary, {
       autoAlpha: 1,
       y: 0,
@@ -2829,9 +2867,26 @@ function reclaimParkedBunnyPlayer(placeholder) {
 
   placeholder.replaceWith(parked);
   parkedBunnyPlayers.delete(id);
+  // A preloaded player was pinned to its best rendition while parked; hand
+  // quality control back to adaptive bitrate now it's on screen. Anything
+  // already buffered stays as it is.
+  if (parked.hasAttribute('data-bunny-preload')) {
+    parked.removeAttribute('data-bunny-preload');
+    if (parked._hls) parked._hls.nextLevel = -1;
+  }
   resumeReparentedPlayer(parked, frame);
   return true;
 }
+
+// Lowest rendition the background video is allowed to play.
+const BG_MIN_HEIGHT = 480;
+// A parked/preloaded video isn't on screen yet, so it loads at the best
+// rendition up to this height instead of climbing from the minimum.
+const BG_PRELOAD_MAX_HEIGHT = 1080;
+// How much of the clip hls.js may hold, in seconds and bytes (the defaults
+// are 30s / 60MB, which a longer or high-bitrate clip would hit).
+const BG_BUFFER_SECONDS = 180;
+const BG_BUFFER_BYTES = 250 * 1000 * 1000;
 
 function initBunnyPlayerBackground(scope) {
   (scope || document).querySelectorAll('[data-bunny-background-init]').forEach(function(player) {
@@ -2904,10 +2959,49 @@ function initBunnyPlayerBackground(scope) {
           readyIfIdle(player, pendingPlay);
         }, { once: true });
       } else if (canUseHlsJs) {
-        var hls = new Hls({ maxBufferLength: 10 });
+        // A short looping background fits entirely in the buffer: allow it to
+        // load the whole clip, and keep the back buffer so the opening
+        // segments aren't evicted (which makes a loop stall after a pass or
+        // two, and means a return visit re-downloads them).
+        var hls = new Hls({
+          maxBufferLength: BG_BUFFER_SECONDS,
+          maxMaxBufferLength: BG_BUFFER_SECONDS,
+          maxBufferSize: BG_BUFFER_BYTES,
+          backBufferLength: Infinity
+        });
         hls.attachMedia(video);
         hls.on(Hls.Events.MEDIA_ATTACHED, function() { hls.loadSource(src); });
         hls.on(Hls.Events.MANIFEST_PARSED, function() {
+          // Never play below BG_MIN_HEIGHT. Chosen by height so it survives a
+          // change to which renditions the library encodes.
+          var minIdx = -1;
+          for (var i = 0; i < hls.levels.length; i++) {
+            if (hls.levels[i].height >= BG_MIN_HEIGHT) { minIdx = i; break; }
+          }
+          // Preloaded while parked behind another page: nobody is watching it
+          // load, so fetch the best rendition straight away and keep it pinned
+          // until the player is handed back (see reclaimParkedBunnyPlayer).
+          if (player.hasAttribute('data-bunny-preload')) {
+            var bestIdx = -1;
+            for (var j = 0; j < hls.levels.length; j++) {
+              if (hls.levels[j].height <= BG_PRELOAD_MAX_HEIGHT && (bestIdx < 0 || hls.levels[j].height >= hls.levels[bestIdx].height)) bestIdx = j;
+            }
+            if (bestIdx > -1) {
+              hls.startLevel = bestIdx;
+              hls.nextLevel = bestIdx;
+              readyIfIdle(player, pendingPlay);
+              return;
+            }
+          }
+          if (minIdx > -1) {
+            // Adaptive bitrate skips every level under this bitrate...
+            hls.config.minAutoBitrate = hls.levels[minIdx].bitrate;
+            // ...and the first segment is pinned to it, then released so the
+            // player can still climb. nextLevel switches ABR off while set.
+            hls.startLevel = minIdx;
+            hls.nextLevel = minIdx;
+            hls.once(Hls.Events.FRAG_BUFFERED, function() { hls.nextLevel = -1; });
+          }
           readyIfIdle(player, pendingPlay);
         });
         player._hls = hls;
