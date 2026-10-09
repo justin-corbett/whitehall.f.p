@@ -99,7 +99,7 @@ gsap.defaults({ ease: "osmo", duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b217';
+const BUILD = 'b218';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -3582,15 +3582,15 @@ function activateImageReveal(prepared) {
 // The overlay is a child of the hero, so it only needs its own opacity
 // tween — it inherits the hero's y movement automatically. Giving it its
 // own y on top of that would double its apparent scroll distance.
-let heroAboutParallaxST = null;
+let heroAboutParallaxMM = null;
 
 function initHeroAboutParallax(scope) {
   if (!hasScrollTrigger) return;
 
-  // Kill the previous page's trigger first.
-  if (heroAboutParallaxST) {
-    heroAboutParallaxST.kill();
-    heroAboutParallaxST = null;
+  // Revert the previous page's trigger (and its media query) first.
+  if (heroAboutParallaxMM) {
+    heroAboutParallaxMM.revert();
+    heroAboutParallaxMM = null;
   }
 
   const root = scope || document;
@@ -3599,22 +3599,26 @@ function initHeroAboutParallax(scope) {
   const overlay = root.querySelector('.home__hero__overlay');
   if (!trigger || (!hero && !overlay)) return;
 
-  const tl = gsap.timeline({
-    scrollTrigger: {
-      trigger: trigger,
-      start: 'top bottom',
-      end: 'top top',
-      scrub: true
+  // The hero only moves up on tablet and above; mobile landscape and below
+  // keep it fixed in place and just fade the overlay.
+  heroAboutParallaxMM = gsap.matchMedia();
+  heroAboutParallaxMM.add({ moves: '(min-width: 768px)', always: '(min-width: 0px)' }, (ctx) => {
+    const tl = gsap.timeline({
+      scrollTrigger: {
+        trigger: trigger,
+        start: 'top bottom',
+        end: 'top top',
+        scrub: true
+      }
+    });
+
+    if (hero && ctx.conditions.moves) {
+      tl.fromTo(hero, { y: '0vh' }, { y: '-50vh', ease: 'none' }, 0);
+    }
+    if (overlay) {
+      tl.fromTo(overlay, { opacity: 0 }, { opacity: 0.5, ease: 'none' }, 0);
     }
   });
-  heroAboutParallaxST = tl.scrollTrigger;
-
-  if (hero) {
-    tl.fromTo(hero, { y: '0vh' }, { y: '-50vh', ease: 'none' }, 0);
-  }
-  if (overlay) {
-    tl.fromTo(overlay, { opacity: 0 }, { opacity: 0.5, ease: 'none' }, 0);
-  }
 }
 
 // -----------------------------------------
