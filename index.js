@@ -74,6 +74,12 @@ let closeNavAnimated = () => Promise.resolve();
 // pages behind the open menu, then the enter closes the menu and fades the
 // new page in. leaveDone flags the leave's prepare step as finished.
 let navWasOpenForTransition = false;
+// Logo state captured when a transition starts, so the transition only
+// replays the intro if the logo wasn't already on screen.
+let navLogoWasShown = true;
+let navAutoHideSuppressed = false;
+let navBarIsVisible = () => true;
+let forceNavBarVisible = () => {};
 let leaveDone = false;
 let navClosed = Promise.resolve(); // resolves once the menu has finished closing
 let hardNavigating = false; // a full page load has taken over from this transition
@@ -93,13 +99,16 @@ const has = (s) => !!nextPage.querySelector(s);
 let staggerDefault = 0.05;
 let durationDefault = 0.6;
 
-CustomEase.create("osmo", "0.625, 0.05, 0, 1");
-gsap.defaults({ ease: "osmo", duration: durationDefault });
+// The site's one easing curve. Every tween uses it (named here so it is
+// changed in one place); only scrubbed scroll tweens stay linear.
+const WH_EASE = "Whitehall Custom Ease";
+CustomEase.create(WH_EASE, "0.625, 0.05, 0, 1");
+gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b222';
+const BUILD = 'b244';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -410,6 +419,7 @@ function initOnceFunctions() {
   }
 
   initMenuButtonHover();
+  initUnderlineLinks(document);
 
   if (document.querySelector('[data-animated-grid]')) {
     initAnimatedGrid();
@@ -467,7 +477,7 @@ function initMenuButtonHover() {
   // overwrite:true / killTweensOf(label) also destroyed navTimeline's own
   // autoAlpha tween on the label, so the menu text stopped fading out when
   // the menu opened.
-  const ROLL = { duration: 0.65, ease: 'osmo', overwrite: 'auto' };
+  const ROLL = { duration: 0.65, ease: WH_EASE, overwrite: 'auto' };
   const isOpen = () => navEl.getAttribute('data-navigation-status') === 'active';
 
   const rollIn = () => {
@@ -503,7 +513,7 @@ function initMenuButtonHover() {
     wasOpen = open;
     if (open) {
       startSync();
-      gsap.to(clone, { autoAlpha: 0, duration: 0.3, ease: 'power1.out', overwrite: 'auto' });
+      gsap.to(clone, { autoAlpha: 0, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
     } else {
       gsap.killTweensOf(clone);
       gsap.set(clone, { yPercent: 100, autoAlpha: 1 });
@@ -673,11 +683,74 @@ function initWebflowForms() {
   });
 }
 
+// Webflow.destroy()/ready() below rebuilds every Lottie on the page, including
+// the nav logo, which blanks out and restarts. Hold a static copy of the logo
+// over it while that happens, then put the rebuilt Lottie on its last frame.
+function holdNavLogo() {
+  const logo = document.querySelector('.nav__logo');
+  const wrap = logo && logo.querySelector('.logo__main__lottie');
+  const svg = wrap && wrap.querySelector('svg');
+  if (!svg) return () => {};
+  const prevPosition = logo.style.position;
+  if (getComputedStyle(logo).position === 'static') logo.style.position = 'relative';
+  const box = wrap.getBoundingClientRect();
+  const base = logo.getBoundingClientRect();
+  const holder = document.createElement('div');
+  holder.setAttribute('aria-hidden', 'true');
+  holder.style.cssText = 'position:absolute;pointer-events:none;top:' + (box.top - base.top) + 'px;left:' + (box.left - base.left) + 'px;width:' + box.width + 'px;height:' + box.height + 'px;';
+  const copy = svg.cloneNode(true);
+  // The site CSS tints the Lottie through `.logo__main__lottie svg path`; the
+  // copy sits outside that selector, so apply the same fill directly.
+  copy.querySelectorAll('path').forEach(p => p.style.setProperty('fill', 'currentColor', 'important'));
+  holder.appendChild(copy);
+  logo.appendChild(holder);
+  return () => {
+    holder.remove();
+    logo.style.position = prevPosition;
+  };
+}
+
+function settleNavLogo(release) {
+  const started = performance.now();
+  const check = () => {
+    const anim = getNavLogoLottie();
+    if (anim) {
+      const finish = () => {
+        anim.loop = false;
+        // A replay that was mid-flight when the rebuild hit carries on from
+        // where it had got to; otherwise rest on the last frame.
+        const elapsed = performance.now() - navLogoPlayStart;
+        const total = anim.getDuration() * 1000;
+        if (navLogoPlayStart && elapsed < total) {
+          console.log('[logo] resume after rebuild', { elapsed: Math.round(elapsed), total: Math.round(total) });
+          anim.setDirection(1);
+          anim.goToAndPlay(elapsed, false);
+        } else {
+          console.log('[logo] rest on last frame after rebuild', { elapsed: Math.round(elapsed), total: Math.round(total) });
+          anim.goToAndStop(anim.totalFrames - 1, true);
+        }
+        requestAnimationFrame(release);
+      };
+      if (anim.isLoaded) finish();
+      else anim.addEventListener('DOMLoaded', finish);
+    } else if (performance.now() - started < 3000) {
+      requestAnimationFrame(check);
+    } else {
+      console.log('[logo] rebuilt Lottie not found after 3s');
+      release();
+    }
+  };
+  requestAnimationFrame(check);
+}
+
 function resetWebflowForms() {
   const w = window.Webflow;
   if (!w) return;
+  console.log('[logo] webflow reset: hold logo', { shown: navLogoWasShown, sinceLastPlayMs: Math.round(performance.now() - navLogoPlayStart) });
+  const releaseLogo = holdNavLogo();
   w.destroy();
   w.ready();
+  settleNavLogo(releaseLogo);
   if (w.require) {
     const forms = w.require("forms");
     if (forms && forms.preview) forms.preview();
@@ -722,6 +795,7 @@ function initAfterEnterFunctions(next) {
   if (has('[data-parallax="trigger"]')) initGlobalParallax(nextPage);
   if (has('.section__about')) initHeroAboutParallax(nextPage);
   if (has('.btn')) initButtonHoverFocus(nextPage);
+  initUnderlineLinks(nextPage);
   // b122 — new page's fields may be autofilled; re-sync their labels.
   if (has('.field')) syncFormFieldLabelsSoon(nextPage);
   // b133 — apply a page's data-nav-default-color even when the page has no
@@ -810,7 +884,7 @@ const PRELOADER_VIDEO_MAX = 3; // longest the wipe waits for the hero video
 const PRELOADER_FADE = 0.3;
 const PRELOADER_FADE_AT = 2.6; // seconds in when the Lottie starts fading, ahead of the wipe
 const PRELOADER_LIFT = -200; // yPercent the Lottie is pulled up by the wipe
-const PRELOADER_WIPE = { duration: 0.9, ease: 'osmo' };
+const PRELOADER_WIPE = { duration: 0.9, ease: WH_EASE };
 const PRELOADER_INTRO_AT = 0.5; // seconds into the wipe when the page intro starts (the ease is visually done by then)
 
 function getPreloaderLottie(preloader) {
@@ -856,7 +930,7 @@ async function runPreloader(container) {
   getPreloaderLottie(preloader)?.goToAndPlay(0, true);
   const lottieEl = preloader.querySelector('[data-preloader-lottie]');
   gsap.delayedCall(PRELOADER_FADE_AT, () => {
-    gsap.to(lottieEl, { autoAlpha: 0, duration: PRELOADER_FADE, ease: 'power1.out' });
+    gsap.to(lottieEl, { autoAlpha: 0, duration: PRELOADER_FADE, ease: WH_EASE });
   });
   await Promise.all([waitSeconds(PRELOADER_HOLD), waitForHeroVideo(container)]);
 
@@ -1021,7 +1095,7 @@ function runPageLeaveAnimation(current, next) {
     // Menu is covering the page — swap colour/content instantly behind it.
     gsap.set(document.body, { backgroundColor: toBg });
   } else {
-    gsap.to(document.body, { backgroundColor: toBg, duration: TRANSITION_BG_DURATION, ease: 'power2.inOut', overwrite: 'auto' });
+    gsap.to(document.body, { backgroundColor: toBg, duration: TRANSITION_BG_DURATION, ease: WH_EASE, overwrite: 'auto' });
   }
   transitionNextBg = toBg;
 
@@ -1035,16 +1109,8 @@ function runPageLeaveAnimation(current, next) {
     tl.to(current, {
       opacity: 0,
       duration: TRANSITION_FADE_OUT,
-      ease: 'power1.out'
+      ease: WH_EASE
     }, 0);
-    // The logo drops out quickly and replays while the old page is still
-    // fading, rather than waiting for the new page.
-    tl.to('.nav__logo', {
-      autoAlpha: 0,
-      duration: NAV_LOGO_OUT,
-      ease: 'power1.out'
-    }, 0);
-    tl.call(revealNavLogo, null, NAV_LOGO_OUT);
   }
 }
 
@@ -1088,7 +1154,7 @@ async function runPageEnterAnimation(next){
     }
     // b115 — matches prepareLineReveal's new resting state (opacity/y/filter),
     // not the old yPercent-only mask reset.
-    (pendingLineReveals || []).forEach(({ split, unit }) => gsap.set(split ? split.lines : unit, { opacity: 1, y: 0 }));
+    (pendingLineReveals || []).forEach(({ split, unit, underline }) => { gsap.set(split ? split.lines : unit, { opacity: 1, y: 0 }); releaseUnderline(underline); });
     pendingLineReveals = null;
     // b113 — lines, not words, now that DISPLAY_LARGE_ANIM splits by line.
     (pendingDisplayLargeReveals || []).forEach(({ splits }) => splits.forEach(split => gsap.set(split.lines, { opacity: 1, y: 0 })));
@@ -1123,14 +1189,16 @@ async function runPageEnterAnimation(next){
     } catch (err) {
     }
     pendingLoadReveal = null;
-    // Non-menu transitions already replayed the logo during the leave.
-    if (navWasOpenForTransition) revealNavLogo();
+    // A visible logo stays as it is; otherwise it draws in with the page.
+    console.log('[logo] startEnter', { navLogoWasShown });
+    if (!navLogoWasShown) forceNavBarVisible();
+    navAutoHideSuppressed = false;
   }, null, "startEnter");
 
   tl.fromTo(next, { autoAlpha: 0 }, {
     autoAlpha: 1,
     duration: TRANSITION_FADE_IN,
-    ease: 'power1.inOut',
+    ease: WH_EASE,
     immediateRender: false
   }, "startEnter");
 
@@ -1242,6 +1310,15 @@ barba.hooks.before(data => {
   // reason — see navigatingAway's own comment and the mouseleave listener
   // in initNavLinkHoverEffects.
   navigatingAway = true;
+
+  const logoEl = document.querySelector('.nav__logo');
+  const logoStyle = logoEl ? getComputedStyle(logoEl) : null;
+  navLogoWasShown = !navWasOpenForTransition && navBarIsVisible() && !!logoStyle &&
+    logoStyle.visibility !== 'hidden' && parseFloat(logoStyle.opacity) > 0.5;
+  navAutoHideSuppressed = true;
+  console.log('[logo] transition start', { shown: navLogoWasShown, barVisible: navBarIsVisible(), opacity: logoStyle && logoStyle.opacity, visibility: logoStyle && logoStyle.visibility, menuOpen: navWasOpenForTransition });
+  // Safety net in case the enter step never runs.
+  setTimeout(() => { navAutoHideSuppressed = false; }, 6000);
 
   // Warm any persistent bunny players (data-bunny-persist="true") right
   // at the start of the transition — force playback and drop their own
@@ -1544,6 +1621,132 @@ function initBarbaNavUpdate(data) {
 // later, once the page is about to be shown (activateLineReveal, at
 // "startEnter") — so an above-the-fold heading reveals right as it
 // appears, instead of sitting visible as static text first.
+// -----------------------------------------
+// UNDERLINE LINKS ([data-underline-link])
+// -----------------------------------------
+
+// GSAP-driven version of the old CSS pseudo-element underline, same look and
+// timing. Each bar is a real span whose visible stretch is a clip-path
+// (left edge / right edge, in %), so an interrupted hover carries on from
+// wherever the line has got to instead of snapping its origin across.
+//   default: rests empty; hover draws it in from the left, hover-out
+//            wipes it away to the right.
+//   "alt":   one line that rests underlined. Hover (and hover-out) wipes it
+//            away to the right, then a fresh line draws in from the left.
+//            A swipe always plays through; if the pointer has moved on by
+//            the time it ends, one more swipe follows.
+const UNDERLINE = { duration: 0.735, wipe: 0.5, ease: WH_EASE, altDelay: 0.3, height: '0.0625em' };
+
+function ensureUnderlineStyle() {
+  if (document.getElementById('wh-underline-js')) return;
+  const style = document.createElement('style');
+  style.id = 'wh-underline-js';
+  style.textContent =
+    '[data-underline-link][data-ul-js]::before,[data-underline-link][data-ul-js]::after{content:none!important;}';
+  document.head.appendChild(style);
+}
+
+function makeUnderlineBar(link) {
+  const el = document.createElement('span');
+  el.setAttribute('aria-hidden', 'true');
+  el.style.cssText =
+    'position:absolute;left:0;bottom:-0.0625em;width:100%;pointer-events:none;background-color:currentColor;' +
+    'height:' + UNDERLINE.height + ';';
+  link.appendChild(el);
+  const bar = { el, l: 0, r: 100 };
+  bar.apply = () => { el.style.clipPath = 'inset(0 ' + bar.r + '% 0 ' + bar.l + '%)'; };
+  bar.apply();
+  return bar;
+}
+
+function underlineBarEmpty(bar) {
+  return 100 - bar.l - bar.r < 0.5;
+}
+
+function underlineGrow(bar, delay) {
+  // An empty bar always starts from the left edge.
+  if (underlineBarEmpty(bar)) { bar.l = 0; bar.r = 100; bar.apply(); }
+  gsap.to(bar, { l: 0, r: 0, duration: UNDERLINE.duration, ease: UNDERLINE.ease, delay: delay || 0, overwrite: true, onUpdate: bar.apply });
+}
+
+function underlineWipe(bar, delay) {
+  // Left edge runs across to the right edge, which stays where it is.
+  gsap.to(bar, { l: 100 - bar.r, duration: UNDERLINE.duration, ease: UNDERLINE.ease, delay: delay || 0, overwrite: true, onUpdate: bar.apply });
+}
+
+function setupUnderline(link) {
+  if (link._ul) return link._ul;
+  if (link.closest('[data-navigation-status]')) return null; // the menu has its own underline
+  ensureUnderlineStyle();
+  link.setAttribute('data-ul-js', '');
+  if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
+
+  const alt = link.getAttribute('data-underline-link') === 'alt';
+  const main = makeUnderlineBar(link);
+  const state = { alt, main, hovered: false, waiting: false, swiping: false };
+  if (alt) {
+    main.l = 0; main.r = 0; main.apply(); // rests underlined
+  } else {
+    main.l = 100; main.r = 0; main.apply();
+  }
+  link._ul = state;
+
+  // alt: wipe out to the right, then draw a new line in from the left.
+  const swipe = () => {
+    state.swiping = true;
+    gsap.killTweensOf(main);
+    const tl = gsap.timeline({ onComplete: () => { state.swiping = false; } });
+    tl.to(main, { l: 100 - main.r, duration: UNDERLINE.wipe, ease: UNDERLINE.ease, onUpdate: main.apply });
+    tl.call(() => { main.l = 0; main.r = 100; main.apply(); });
+    tl.to(main, { r: 0, duration: UNDERLINE.duration, ease: UNDERLINE.ease, onUpdate: main.apply });
+  };
+
+  const source = link.closest('[data-hover]') || link;
+  const canHover = () => window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  source.addEventListener('mouseenter', () => {
+    if (!canHover()) return;
+    state.hovered = true;
+    if (alt) {
+      if (!state.swiping) swipe();
+    } else {
+      underlineGrow(main, 0);
+    }
+  });
+  source.addEventListener('mouseleave', () => {
+    if (!state.hovered) return;
+    state.hovered = false;
+    if (!alt) underlineWipe(main, 0); // alt: a swipe in flight just plays out
+  });
+  return state;
+}
+
+function initUnderlineLinks(scope) {
+  (scope || document).querySelectorAll('[data-underline-link]').forEach(setupUnderline);
+}
+
+// Underlined links inside revealed text: the line sits outside the split
+// words, so it is held back until the reveal starts and then drawn in with it.
+function holdUnderline(el) {
+  const link = el.closest('[data-underline-link]') || el.querySelector('[data-underline-link]');
+  if (!link) return null;
+  const state = setupUnderline(link);
+  if (!state) return null;
+  state.waiting = true;
+  if (state.alt) {
+    gsap.killTweensOf(state.main);
+    state.swiping = false;
+    state.main.l = 0; state.main.r = 100; state.main.apply();
+  }
+  return link;
+}
+
+function releaseUnderline(link) {
+  const state = link && link._ul;
+  if (!state || !state.waiting) return;
+  state.waiting = false;
+  if (state.alt && !state.swiping) underlineGrow(state.main, UNDERLINE.altDelay);
+}
+
 function prepareLineReveal(scope) {
   if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
 
@@ -1615,11 +1818,11 @@ function prepareLineReveal(scope) {
     const heroGroup = heroAncestor ? heroTitleGroups.get(heroAncestor) : null;
     const heroSection = (heroGroup && heroGroup.introWrap && heroGroup.introWrap.contains(el)) ? heroAncestor : null;
 
-    prepared.push({ split, start, trigger: el, heroSection });
+    prepared.push({ split, start, trigger: el, heroSection, underline: holdUnderline(el) });
   });
   inlineUnits.forEach((start, unit) => {
     gsap.set(unit, { opacity: 0, y: `${DISPLAY_LARGE_ANIM.travelEm}em` });
-    prepared.push({ split: null, unit, start, trigger: unit, heroSection: null });
+    prepared.push({ split: null, unit, start, trigger: unit, heroSection: null, underline: holdUnderline(unit) });
   });
   return prepared;
 }
@@ -1631,7 +1834,7 @@ const LINE_REVEAL_DURATION = 1.9;
 const LINE_REVEAL_STAGGER = 0.05;
 
 function activateLineReveal(prepared) {
-  (prepared || []).forEach(({ split, unit, start, trigger, heroSection }) => {
+  (prepared || []).forEach(({ split, unit, start, trigger, heroSection, underline }) => {
     // An entry tagged with heroSection is fired by activateDisplayLargeReveal
     // instead (in the same callback as the title's own reveal), so it must
     // NOT also get its own trigger here — that would double-animate it.
@@ -1643,7 +1846,7 @@ function activateLineReveal(prepared) {
       onEnter: () => {
         // b147 — an inline run is revealed as one unit (see prepareLineReveal).
         if (unit) {
-          gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, ease: DISPLAY_LARGE_ANIM.ease });
+          gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, ease: DISPLAY_LARGE_ANIM.ease, onStart: () => releaseUnderline(underline) });
           return;
         }
         // b115 — same animation as the display-heading reveal (DISPLAY_LARGE_ANIM):
@@ -1653,7 +1856,8 @@ function activateLineReveal(prepared) {
           y: 0,
           duration: DISPLAY_LARGE_ANIM.duration,
           ease: DISPLAY_LARGE_ANIM.ease,
-          stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" }
+          stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" },
+          onStart: () => releaseUnderline(underline)
         });
       }
     });
@@ -1661,6 +1865,9 @@ function activateLineReveal(prepared) {
 }
 
 let navTextSplits = [];
+
+// Menu logo fade-out when the menu closes.
+const SECONDARY_LOGO_FADE = 0.3;
 
 function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, navLogoSecondary, navLinkEls, navLinkSplits, topSecondarySplits, bottomSecondarySplits, closeIcon, menuLabel, onReady, onLinkReady }) {
   // Main link chars roll up into place on open, masked by the same
@@ -1670,7 +1877,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   const CHAR_TRAVEL = 100;
   const CHAR_DURATION = NAV_CHAR_ANIM.duration;
   const CHAR_STAGGER = NAV_CHAR_ANIM.stagger;
-  const CHAR_EASE = 'osmo';
+  const CHAR_EASE = WH_EASE;
   const LINKS_START = 0.25;    // when the first link's characters start
 
   const linkChars = navLinkSplits.flatMap(split => split.chars);
@@ -1710,7 +1917,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   // handled separately in openNav/closeNav, so a page transition can keep it
   // hidden and replay its Lottie instead).
   if (menuLabel) {
-    tl.to(menuLabel, { autoAlpha: 0, duration: 0.3, ease: "power2.in" }, 0);
+    tl.to(menuLabel, { autoAlpha: 0, duration: 0.3, ease: WH_EASE }, 0);
   }
 
   // Explicit starting scale — Webflow's Transform panel can leave stray
@@ -1721,7 +1928,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   tl.to(tileFill, {
     scaleY: 1,
     duration: 1,
-    ease: "osmo"
+    ease: WH_EASE
   }, 0);
 
   // Main links — one .to() per link (not one flattened array) so each
@@ -1758,11 +1965,20 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
 
   // Secondary logo mark — bounces in over the tail of the main links.
   if (navLogoSecondary && secondaryHasLottie) {
-    tl.set(navLogoSecondary, { autoAlpha: 1 }, "linksDone-=0.3");
     tl.call(() => {
-      if (tl.reversed()) { resetSecondaryLogo(); return; }
-      // The menu is display:none until it opens, so Webflow may not have
-      // created this Lottie yet — wait (briefly) for it to register and load.
+      // Closing is handled with the bottom links, below. Only if the menu is
+      // closed before that point does this catch the logo still showing.
+      if (tl.reversed()) {
+        if (!gsap.isTweening(navLogoSecondary) && gsap.getProperty(navLogoSecondary, 'autoAlpha') > 0) {
+          gsap.to(navLogoSecondary, { autoAlpha: 0, duration: SECONDARY_LOGO_FADE, ease: WH_EASE, onComplete: resetSecondaryLogo });
+        }
+        return;
+      }
+
+      // Opening. The menu is display:none until it opens, so Webflow may not
+      // have created this Lottie yet — wait (briefly) for it to load.
+      gsap.killTweensOf(navLogoSecondary);
+      gsap.set(navLogoSecondary, { autoAlpha: 1 });
       const started = performance.now();
       const tryPlay = () => {
         if (tl.reversed() || tl.progress() === 0) return;
@@ -1783,7 +1999,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
       y: 0,
       scale: 1,
       duration: 0.7,
-      ease: "back.out(1.7)"
+      ease: WH_EASE
     }, "linksDone-=0.3");
   }
 
@@ -1791,16 +2007,31 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   tl.to(topLines, {
     yPercent: 0,
     duration: 0.7,
-    ease: "power3.out",
+    ease: WH_EASE,
     stagger: 0.05
   }, "linksDone-=0.15");
 
-  tl.to(bottomLines, {
+  const bottomTween = tl.to(bottomLines, {
     yPercent: 0,
     duration: 0.7,
-    ease: "power3.out",
+    ease: WH_EASE,
     stagger: 0.05
   }, "linksDone-=0.15");
+
+  // On close the menu logo fades out as the bottom links roll away: this
+  // call sits at the end of their tween, which the reverse reaches first.
+  if (navLogoSecondary && secondaryHasLottie) {
+    tl.call(() => {
+      if (!tl.reversed()) return;
+      gsap.to(navLogoSecondary, {
+        autoAlpha: 0,
+        duration: SECONDARY_LOGO_FADE,
+        ease: WH_EASE,
+        overwrite: 'auto',
+        onComplete: resetSecondaryLogo
+      });
+    }, null, bottomTween.startTime() + bottomTween.duration());
+  }
 
   // X icon — same bounce as the secondary logo. Folded into this
   // timeline so open/close both handle it via play()/reverse().
@@ -1811,7 +2042,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
       y: 0,
       scale: 1,
       duration: 0.7,
-      ease: "back.out(1.7)"
+      ease: WH_EASE
     }, 1);
   }
 
@@ -1842,7 +2073,7 @@ const NAV_CHAR_ANIM = {
   blur: 10,
   duration: 0.7,
   stagger: 0.012,
-  ease: "power3.out"
+  ease: WH_EASE
 };
 
 // Delay before the underline grows in on hover — shorter than the roll
@@ -2039,9 +2270,9 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const entry = linkConfigs.get(link);
     if (!entry) return;
     activeLink = link;
-    gsap.to(tileFill, { backgroundColor: entry.config.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
-    if (tileCircle) gsap.to(tileCircle, { backgroundColor: entry.config.bg, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
-    gsap.to(colorTargets, { color: entry.config.color, duration: 0.6, ease: 'power2.out', overwrite: 'auto' });
+    gsap.to(tileFill, { backgroundColor: entry.config.bg, duration: 0.6, ease: WH_EASE, overwrite: 'auto' });
+    if (tileCircle) gsap.to(tileCircle, { backgroundColor: entry.config.bg, duration: 0.6, ease: WH_EASE, overwrite: 'auto' });
+    gsap.to(colorTargets, { color: entry.config.color, duration: 0.6, ease: WH_EASE, overwrite: 'auto' });
 
     // Underline grows in.
     if (entry.underline) {
@@ -2050,7 +2281,7 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       gsap.to(entry.underline, {
         scaleX: 1,
         duration: UNDERLINE_DURATION,
-        ease: 'osmo',
+        ease: WH_EASE,
         delay: NAV_UNDERLINE_DELAY,
         overwrite: 'auto'
       });
@@ -2060,8 +2291,8 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       const { origLines, altLines, place } = entry.swap;
       entry.swap.active = true;
       place();
-      gsap.to(origLines, { yPercent: -110, duration: 0.6, ease: 'osmo', overwrite: 'auto' });
-      gsap.to(altLines, { yPercent: 0, duration: 0.6, ease: 'osmo', delay: 0.05, overwrite: 'auto' });
+      gsap.to(origLines, { yPercent: -110, duration: 0.6, ease: WH_EASE, overwrite: 'auto' });
+      gsap.to(altLines, { yPercent: 0, duration: 0.6, ease: WH_EASE, delay: 0.05, overwrite: 'auto' });
     }
 
     // Hover-intent delay — a quick flick through links shouldn't start
@@ -2071,12 +2302,12 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       imageRevealTimer = setTimeout(() => {
         if (activeLink !== link) return;
         gsap.killTweensOf(entry.image);
-        gsap.to(entry.image, { clipPath: 'inset(0% 0% 0% 0%)', scale: 1, duration: 0.8, ease: 'power3.out' });
+        gsap.to(entry.image, { clipPath: 'inset(0% 0% 0% 0%)', scale: 1, duration: 0.8, ease: WH_EASE });
         if (entry.captionSplit) {
           gsap.to(entry.captionSplit.words, {
             yPercent: 0,
             duration: 0.6,
-            ease: 'power3.out',
+            ease: WH_EASE,
             stagger: 0.04
           });
         }
@@ -2097,10 +2328,10 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     if (!(opts && opts.keepColors)) {
       // Revert to the current page's resting colors (restBg/restColor, kept
       // up to date by updateNavRestingColors) rather than a fixed default.
-      gsap.to(tileFill, { backgroundColor: restBg, duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
-      if (tileCircle) gsap.to(tileCircle, { backgroundColor: restBg, duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(tileFill, { backgroundColor: restBg, duration: 0.5, ease: WH_EASE, overwrite: 'auto' });
+      if (tileCircle) gsap.to(tileCircle, { backgroundColor: restBg, duration: 0.5, ease: WH_EASE, overwrite: 'auto' });
       colorTargets.forEach((el, i) => {
-        gsap.to(el, { color: restColor || defaultColors[i], duration: 0.5, ease: 'power2.out', overwrite: 'auto' });
+        gsap.to(el, { color: restColor || defaultColors[i], duration: 0.5, ease: WH_EASE, overwrite: 'auto' });
       });
     }
     if (entry.underline) {
@@ -2110,25 +2341,25 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       gsap.to(entry.underline, {
         scaleX: 0,
         duration: UNDERLINE_DURATION,
-        ease: 'osmo',
+        ease: WH_EASE,
         overwrite: 'auto'
       });
     }
     if (entry.swap && entry.swap.active) {
       const { origLines, altLines } = entry.swap;
       entry.swap.active = false;
-      gsap.to(altLines, { yPercent: 110, duration: 0.5, ease: 'osmo', overwrite: 'auto' });
-      gsap.to(origLines, { yPercent: 0, duration: 0.5, ease: 'osmo', delay: 0.05, overwrite: 'auto' });
+      gsap.to(altLines, { yPercent: 110, duration: 0.5, ease: WH_EASE, overwrite: 'auto' });
+      gsap.to(origLines, { yPercent: 0, duration: 0.5, ease: WH_EASE, delay: 0.05, overwrite: 'auto' });
     }
     if (entry.image) {
       gsap.killTweensOf(entry.image);
-      gsap.to(entry.image, { clipPath: 'inset(100% 0% 0% 0%)', scale: 1.05, duration: 0.5, ease: 'power2.in' });
+      gsap.to(entry.image, { clipPath: 'inset(100% 0% 0% 0%)', scale: 1.05, duration: 0.5, ease: WH_EASE });
     }
     if (entry.captionSplit) {
       gsap.to(entry.captionSplit.words, {
         yPercent: 110,
         duration: 0.4,
-        ease: 'power2.in',
+        ease: WH_EASE,
         stagger: 0.03
       });
     }
@@ -2145,7 +2376,7 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       if (isSettled && !isSettled(link)) return;
       // b132 — never start a hover while the menu is closing/closed.
       if (navEl.getAttribute('data-navigation-status') !== 'active') return;
-      if (activeLink && activeLink !== link) leave(activeLink);
+      if (activeLink && activeLink !== link) leave(activeLink, { keepColors: true });
       enter(link);
     });
     link.addEventListener('mouseleave', () => {
@@ -2167,8 +2398,10 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       // spurious — skip its roll the same way resetAllLinks's own
       // cleanup does, but still let the color settle back to default
       // since the menu really is closing in that case.
-      const isNavActive = navEl.getAttribute('data-navigation-status') === 'active';
-      leave(link);
+      // The colour theme stays on the last hovered link; it only changes when
+      // another link is hovered, and resets to the page default once the menu
+      // has closed (see closeNav / onReverseComplete).
+      leave(link, { keepColors: true });
     });
   });
 
@@ -2232,20 +2465,20 @@ function initNavButtonCursorClose(navEl) {
 
   // Opacity dim while a nav link is hovered.
   function dimCloseIcon() {
-    if (closeIcon) gsap.to(closeIcon, { opacity: 0.4, duration: 0.25, ease: 'power2.in' });
+    if (closeIcon) gsap.to(closeIcon, { opacity: 0.4, duration: 0.25, ease: WH_EASE });
   }
 
   function undimCloseIcon() {
-    if (closeIcon) gsap.to(closeIcon, { opacity: 1, duration: 0.25, ease: 'power2.out' });
+    if (closeIcon) gsap.to(closeIcon, { opacity: 1, duration: 0.25, ease: WH_EASE });
   }
 
   // Subtle scale-down on hover.
   if (button && closeIcon) {
     button.addEventListener('mouseenter', () => {
-      gsap.to(closeIcon, { scale: 0.9, duration: 0.3, ease: 'power2.out' });
+      gsap.to(closeIcon, { scale: 0.9, duration: 0.3, ease: WH_EASE });
     });
     button.addEventListener('mouseleave', () => {
-      gsap.to(closeIcon, { scale: 1, duration: 0.3, ease: 'power2.out' });
+      gsap.to(closeIcon, { scale: 1, duration: 0.3, ease: WH_EASE });
     });
   }
 
@@ -2277,7 +2510,10 @@ function resetNavLogo() {
   anim.goToAndStop(0, true);
 }
 
+let navLogoPlayStart = 0;
 function playNavLogo() {
+  navLogoPlayStart = performance.now();
+  console.log('[logo] play', (new Error().stack || '').split('\n').slice(2, 5).join(' | '));
   const anim = getNavLogoLottie();
   if (!anim) return;
   anim.loop = false;
@@ -2325,6 +2561,23 @@ function initNavAutoHide() {
   const SHOW_NEAR_TOP = 100; // always visible this close to the page top
   const DIRECTION_THRESHOLD = 5; // ignores sub-pixel/trackpad jitter
 
+  // Read what is actually on screen rather than trusting the flag, which can
+  // fall out of step with the bar's opacity.
+  navBarIsVisible = () => {
+    if (parseFloat(getComputedStyle(navBar).opacity) > 0.5) {
+      visible = true;
+      return true;
+    }
+    return false;
+  };
+  forceNavBarVisible = () => {
+    console.log('[logo] forceNavBarVisible: bar fades in, Lottie replays');
+    visible = true;
+    navBar.style.pointerEvents = 'auto';
+    gsap.to(navBar, { opacity: 1, duration: 0.4, ease: WH_EASE, overwrite: true });
+    revealNavLogo();
+  };
+
   function setVisible(next) {
     if (visible === next) return;
     visible = next;
@@ -2332,7 +2585,7 @@ function initNavAutoHide() {
     gsap.to(navBar, {
       opacity: next ? 1 : 0,
       duration: 0.4,
-      ease: 'power2.out',
+      ease: WH_EASE,
       overwrite: true,
       onComplete: () => {
         navBar.style.pointerEvents = next ? 'auto' : 'none';
@@ -2357,6 +2610,10 @@ function initNavAutoHide() {
       const current = self.scroll();
       const delta = current - lastScroll;
       lastScroll = current;
+
+      // Page transitions reset the scroll; the transition decides what the
+      // logo does, not the scroll direction.
+      if (navAutoHideSuppressed) return;
 
       // Full-screen menu open, or barely scrolled — always stay visible.
       if (navEl.getAttribute('data-navigation-status') === 'active' || current < SHOW_NEAR_TOP) {
@@ -2453,7 +2710,7 @@ function initFullScreenNavigation() {
     if (navTile) navTile.style.pointerEvents = '';
     navEl.setAttribute('data-navigation-status', 'active');
     if (lenis && typeof lenis.stop === "function") lenis.stop();
-    if (navLogo) gsap.to(navLogo, { autoAlpha: 0, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
+    if (navLogo) gsap.to(navLogo, { autoAlpha: 0, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
     navTimeline.timeScale(OPEN_SPEED).play();
   }
 
@@ -2469,7 +2726,9 @@ function initFullScreenNavigation() {
     // b132 — whole menu inert while it closes, so a link can't be hovered
     // (or clicked) on the way out.
     if (navTile) navTile.style.pointerEvents = 'none';
-    resetLinkHovers({ keepColors: keepColors === true });
+    // Colours are left as they are while the menu closes, then snapped back
+    // to the page's default theme once it's hidden (onReverseComplete).
+    resetLinkHovers({ keepColors: true });
     navEl.setAttribute('data-navigation-status', 'not-active');
     // A close for a page transition leaves the logo hidden; the incoming
     // page plays it in (see revealNavLogo).
@@ -2477,7 +2736,7 @@ function initFullScreenNavigation() {
       gsap.to(navLogo, {
         autoAlpha: 1,
         duration: 0.3,
-        ease: 'power2.out',
+        ease: WH_EASE,
         delay: Math.max(0, navTimeline.duration() / CLOSE_SPEED - 0.3),
         overwrite: 'auto'
       });
@@ -2489,6 +2748,7 @@ function initFullScreenNavigation() {
   // finished — not set inside closeNav(), which would cut it off mid-flight.
   navTimeline.eventCallback("onReverseComplete", () => {
     if (navTile) navTile.style.display = 'none';
+    updateNavRestingColors();
     if (lenis && typeof lenis.start === "function") lenis.start();
   });
 
@@ -2880,6 +3140,9 @@ function reclaimParkedBunnyPlayer(placeholder) {
 
 // Lowest rendition the background video is allowed to play.
 const BG_MIN_HEIGHT = 480;
+// Rendition the video starts on (the first one at least this tall, or the
+// tallest there is). Adaptive bitrate takes over after the first segment.
+const BG_START_HEIGHT = 720;
 // A parked/preloaded video isn't on screen yet, so it loads at the best
 // rendition up to this height instead of climbing from the minimum.
 const BG_PRELOAD_MAX_HEIGHT = 1080;
@@ -2996,10 +3259,16 @@ function initBunnyPlayerBackground(scope) {
           if (minIdx > -1) {
             // Adaptive bitrate skips every level under this bitrate...
             hls.config.minAutoBitrate = hls.levels[minIdx].bitrate;
-            // ...and the first segment is pinned to it, then released so the
-            // player can still climb. nextLevel switches ABR off while set.
-            hls.startLevel = minIdx;
-            hls.nextLevel = minIdx;
+            // ...and the first segment is pinned to the start rendition, then
+            // released so the player can still adapt. nextLevel switches ABR
+            // off while set.
+            var startIdx = minIdx;
+            for (var k = 0; k < hls.levels.length; k++) {
+              if (hls.levels[k].height >= BG_START_HEIGHT) { startIdx = k; break; }
+              if (hls.levels[k].height > hls.levels[startIdx].height) startIdx = k;
+            }
+            hls.startLevel = startIdx;
+            hls.nextLevel = startIdx;
             hls.once(Hls.Events.FRAG_BUFFERED, function() { hls.nextLevel = -1; });
           }
           readyIfIdle(player, pendingPlay);
@@ -3144,7 +3413,7 @@ function initAnimatedGrid() {
     }, {
       yPercent: 0,
       duration: 1,
-      ease: "expo.inOut",
+      ease: WH_EASE,
       stagger: { each: 0.03, from: "start" },
       overwrite: true
     });
@@ -3159,7 +3428,7 @@ function initAnimatedGrid() {
     }, {
       yPercent: -100,
       duration: 1,
-      ease: "expo.inOut",
+      ease: WH_EASE,
       stagger: { each: 0.03, from: "start" },
       overwrite: true
     });
@@ -3297,7 +3566,7 @@ const DISPLAY_LARGE_ANIM = {
   blurPx: 0, // b134 — blur removed from all text/image/sticker reveals (no filter is applied any more)
   duration: 0.7,
   stagger: 0.018,
-  ease: 'power3.out'
+  ease: WH_EASE
 };
 
 // Same prepare/activate split as prepareLineReveal/activateLineReveal, and
@@ -3445,7 +3714,8 @@ function activateDisplayLargeReveal(prepared, linePrepared) {
               y: 0,
               duration: duration,
               ease: DISPLAY_LARGE_ANIM.ease,
-              stagger: { each: stagger, from: "start" }
+              stagger: { each: stagger, from: "start" },
+              onStart: () => releaseUnderline(entry.underline)
             });
           });
         }
@@ -3463,7 +3733,7 @@ function activateDisplayLargeReveal(prepared, linePrepared) {
 // once, as it scrolls into view. scaleX (not width) so it's GPU-cheap and
 // doesn't reflow; same prepare (hidden, behind the transition) /
 // activate (ScrollTrigger, at "pageReady") split as the other reveals.
-const RULE_REVEAL = { duration: 1, ease: 'power3.out' };
+const RULE_REVEAL = { duration: 1, ease: WH_EASE };
 
 function prepareRuleReveal(scope) {
   if (typeof ScrollTrigger === "undefined") return [];
@@ -3723,7 +3993,7 @@ function initHeroAboutParallax(scope) {
 // recipe; DISPLAY_LARGE_ANIM uses the same shape with its own timing.
 const LOAD_TEXT_REVEAL = {
   duration: 0.7,
-  ease: 'power3.out',
+  ease: WH_EASE,
   stagger: 0.018,
   travel: 60,   // yPercent
   rotate: 90    // degrees
@@ -3733,7 +4003,7 @@ const LOAD_TEXT_REVEAL = {
 // directly rather than tied to a ScrollTrigger.
 const LOAD_LINE_REVEAL = {
   duration: 1.2,
-  ease: 'power1.out',
+  ease: WH_EASE,
   stagger: 0.02
 };
 
@@ -3821,7 +4091,7 @@ const NAV_OPEN_ROLL = {
   travel: 100,
   duration: NAV_CHAR_ANIM.duration,
   stagger: NAV_CHAR_ANIM.stagger,
-  ease: 'osmo'
+  ease: WH_EASE
 };
 
 function revealCharsRollIn(el, opts) {
@@ -3904,7 +4174,7 @@ function prepareLoadReveal(scope, opts) {
   // first load; Barba navigations (no chrome) have nothing to prepare.
   if (!wordmark && !withChrome) return null;
 
-  const HERO_ROLL = { duration: 0.9, stagger: 0.04, ease: 'osmo' };
+  const HERO_ROLL = { duration: 0.9, stagger: 0.04, ease: WH_EASE };
 
   // Hidden until the Lottie is ready to play from its first frame.
   if (wordmark) gsap.set(wordmark, { autoAlpha: 0 });
@@ -4055,9 +4325,9 @@ function initColorZones(scope) {
   }
 
   const revertToDefault = () => {
-    gsap.to(target, { backgroundColor: defaultBg, color: defaultText, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
+    gsap.to(target, { backgroundColor: defaultBg, color: defaultText, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
     navTargets.forEach((el, i) => {
-      gsap.to(el, { color: defaultNavColors[i], duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(el, { color: defaultNavColors[i], duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
     });
   };
 
@@ -4066,8 +4336,8 @@ function initColorZones(scope) {
     if (!trigger) return;
 
     const setZone = () => {
-      gsap.to(target, { backgroundColor: bg, color: text, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
-      if (navTargets.length) gsap.to(navTargets, { color: text, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(target, { backgroundColor: bg, color: text, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
+      if (navTargets.length) gsap.to(navTargets, { color: text, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
 
       // Retint any buttons that live inside this zone's own section —
       // updates their resting colors (not just a one-off tween) so a
@@ -4079,8 +4349,8 @@ function initColorZones(scope) {
           if (!middle) return;
           btnEl._restBg = btn.bg;
           btnEl._restText = btn.text;
-          gsap.to(middle, { backgroundColor: btn.bg, color: btn.text, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
-          if (caps.length) gsap.to(caps, { color: btn.bg, duration: COLOR_ZONE_DURATION, ease: 'power2.out', overwrite: 'auto' });
+          gsap.to(middle, { backgroundColor: btn.bg, color: btn.text, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
+          if (caps.length) gsap.to(caps, { color: btn.bg, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
         });
       }
     };
@@ -4196,19 +4466,19 @@ function initButtonHoverFocus(scope) {
     }
 
     const enter = () => {
-      gsap.to(caps, { color: HOVER_BG, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
-      gsap.to(middle, { backgroundColor: HOVER_BG, color: HOVER_TEXT, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(caps, { color: HOVER_BG, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
+      gsap.to(middle, { backgroundColor: HOVER_BG, color: HOVER_TEXT, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
       if (rollPairs) {
-        gsap.to(rollPairs.orig, { yPercent: -100, duration: 0.65, ease: 'osmo', overwrite: true });
-        gsap.to(rollPairs.clone, { yPercent: 0, duration: 0.65, ease: 'osmo', overwrite: true });
+        gsap.to(rollPairs.orig, { yPercent: -100, duration: 0.65, ease: WH_EASE, overwrite: true });
+        gsap.to(rollPairs.clone, { yPercent: 0, duration: 0.65, ease: WH_EASE, overwrite: true });
       }
     };
     const leave = () => {
-      gsap.to(caps, { color: btn._restBg, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
-      gsap.to(middle, { backgroundColor: btn._restBg, color: btn._restText, duration: 0.3, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(caps, { color: btn._restBg, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
+      gsap.to(middle, { backgroundColor: btn._restBg, color: btn._restText, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
       if (rollPairs) {
-        gsap.to(rollPairs.orig, { yPercent: 0, duration: 0.65, ease: 'osmo', overwrite: true });
-        gsap.to(rollPairs.clone, { yPercent: 100, duration: 0.65, ease: 'osmo', overwrite: true });
+        gsap.to(rollPairs.orig, { yPercent: 0, duration: 0.65, ease: WH_EASE, overwrite: true });
+        gsap.to(rollPairs.clone, { yPercent: 100, duration: 0.65, ease: WH_EASE, overwrite: true });
       }
     };
 
@@ -4331,7 +4601,7 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
           .to(prev.split.lines, {
             ...DECADE_HIDDEN,
             duration: DECADE_OUT_DURATION,
-            ease: "power2.in",
+            ease: WH_EASE,
             stagger: { each: DECADE_OUT_STAGGER, from: "start" }
           })
           .set(prev.item, { display: 'none' });
