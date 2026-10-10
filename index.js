@@ -108,7 +108,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b293';
+const BUILD = 'b295';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -648,9 +648,16 @@ function initEmailCopy() {
     nodes[0].nodeValue = lowercase ? MESSAGE.toLowerCase() : MESSAGE;
     for (let i = 1; i < nodes.length; i++) nodes[i].nodeValue = '';
     if (lowercase) a.style.textTransform = 'none';
+    // The underline bar is 100% of the link, but Safari on iOS keeps painting
+    // it at the old text's width after the swap. Sizing it in pixels from the
+    // new layout (reading the width forces one) makes it follow the text.
+    const bar = a.querySelector('[data-underline-bar]') || [...a.children].find(c => c.tagName === 'SPAN' && getComputedStyle(c).position === 'absolute');
+    const fitBar = () => { if (bar) bar.style.width = `${a.getBoundingClientRect().width}px`; };
+    fitBar();
     a._copyTimer = setTimeout(() => {
       nodes.forEach((n, i) => { n.nodeValue = originals[i]; });
       if (lowercase) a.style.textTransform = '';
+      if (bar) bar.style.width = '100%';
       a._copyTimer = null;
     }, HOLD_MS);
   }, true);
@@ -1836,6 +1843,9 @@ function releaseUnderline(link) {
 // "and") are glued into one unbreakable chunk and wrap in odd places. Real
 // spaces go in between, and the link margins that stood in for them go out.
 function spaceInlineRuns(scope) {
+  // An address that swaps to "Copied to clipboard" must stay on one line,
+  // or its underline (one box sized to the link) splits across the wrap.
+  (scope || document).querySelectorAll('a[data-copy-email]').forEach(a => { a.style.whiteSpace = 'nowrap'; });
   (scope || document).querySelectorAll('[data-line-reveal]').forEach(el => {
     if (getComputedStyle(el).display !== 'inline') return;
     const next = el.nextSibling;
