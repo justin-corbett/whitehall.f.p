@@ -108,7 +108,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b244';
+const BUILD = 'b249';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -409,6 +409,8 @@ function initOnceFunctions() {
   // fields present at first load, so it died after a page change).
   initFormFieldLabels();
   initEmailCopy();
+  initFooterLogoScroll();
+  initPagePrefetch();
   initFormSubmitMirror();
   initFormSendingState();
 
@@ -522,6 +524,65 @@ function initMenuButtonHover() {
       stopSync();
     }
   }).observe(navEl, { attributes: true, attributeFilter: ['data-navigation-status'] });
+}
+
+// Page prefetch. Barba fetches the destination HTML on click and starts the
+// transition only once it arrives, so a slow or cold response reads as a
+// dead click. Warming Barba's cache ahead of the click removes that wait:
+// every internal link is fetched quietly after load, and anything missed is
+// fetched on hover / touch / focus.
+function initPagePrefetch() {
+  const warmed = new Set();
+  const isWarmable = link => {
+    if (!link || !link.href || link.target === '_blank' || link.hasAttribute('download')) return false;
+    if (link.hasAttribute('data-barba-prevent') || link.closest('[data-barba-prevent]')) return false;
+    if (!/^https?:$/.test(link.protocol) || link.origin !== window.location.origin) return false;
+    return link.pathname !== window.location.pathname;
+  };
+  const warm = link => {
+    if (!isWarmable(link)) return;
+    const href = link.href.split('#')[0];
+    if (warmed.has(href) || barba.cache.has(href)) return;
+    warmed.add(href);
+    const request = barba.request(href, barba.timeout, barba.onRequestError.bind(barba, 'barba'), barba.cache, barba.headers);
+    barba.cache.set(href, request, 'barba', 200);
+    request.catch(() => { barba.cache.delete(href); warmed.delete(href); });
+  };
+
+  const intent = e => warm(e.target.closest && e.target.closest('a[href]'));
+  ['pointerenter', 'touchstart', 'focusin'].forEach(type => document.addEventListener(type, intent, { capture: true, passive: true }));
+  document.addEventListener('mouseover', intent, { passive: true });
+
+  const connection = navigator.connection || {};
+  if (connection.saveData) return;
+  const warmAll = () => {
+    const queue = [...document.querySelectorAll('a[href]')].filter(isWarmable);
+    const next = () => {
+      const link = queue.shift();
+      if (!link) return;
+      warm(link);
+      setTimeout(next, 150);
+    };
+    next();
+  };
+  const start = () => ('requestIdleCallback' in window ? requestIdleCallback(warmAll, { timeout: 3000 }) : setTimeout(warmAll, 1500));
+  if (document.readyState === 'complete') start();
+  else window.addEventListener('load', () => setTimeout(start, 500), { once: true });
+}
+
+// Footer logo: on the homepage it scrolls smoothly to the top instead of
+// reloading the page; everywhere else it is a normal link home. Capture
+// phase so Barba never sees the same-page click.
+function initFooterLogoScroll() {
+  document.addEventListener('click', e => {
+    const link = e.target.closest && e.target.closest('.footer__logo');
+    if (!link || e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+    if (link.pathname.replace(/\/$/, '') !== window.location.pathname.replace(/\/$/, '')) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (lenis) lenis.scrollTo(0, { duration: 2, easing: gsap.parseEase(WH_EASE) });
+    else window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, true);
 }
 
 // b162 — links tagged [data-copy-email] copy their address to the clipboard instead of
@@ -3854,8 +3915,10 @@ function prepareImageReveal(scope) {
     const el = trigger.hasAttribute('data-parallax-inner')
       ? (trigger.querySelector('.parallax-slider__item-img') || trigger)
       : (trigger.querySelector('[data-parallax="target"]') || trigger);
+    // Images rise without fading; buttons and the map still fade in.
+    const fades = !trigger.matches('[data-parallax="trigger"]');
     gsap.set(el, {
-      opacity: 0,
+      ...(fades && { opacity: 0 }),
       y: `${IMAGE_REVEAL_RISE_REM}rem`,
     });
     prepared.push({ el, trigger });
@@ -3876,7 +3939,7 @@ let imageRevealCall = null;
 
 function revealImage(el) {
   gsap.to(el, {
-    opacity: 1,
+    opacity: 1, // no-op for images, which never fade
     y: 0,
     duration: DISPLAY_LARGE_ANIM.duration,
     ease: DISPLAY_LARGE_ANIM.ease
