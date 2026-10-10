@@ -108,7 +108,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b289';
+const BUILD = 'b293';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -574,14 +574,22 @@ function initPagePrefetch() {
 // reloading the page; everywhere else it is a normal link home. Capture
 // phase so Barba never sees the same-page click.
 function initFooterLogoScroll() {
+  const scrollToTop = () => {
+    if (lenis) lenis.scrollTo(0, { duration: 2, easing: gsap.parseEase(WH_EASE), force: true });
+    else window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
   document.addEventListener('click', e => {
-    const link = e.target.closest && e.target.closest('.footer__logo');
+    // The footer logo, and any link inside the nav (its logo, the menu's
+    // links). Pointing at the page already open, none of them navigate:
+    // Barba would reload the page, which reads as a flash. The menu closes
+    // if it is open, then the page scrolls to the top.
+    const link = e.target.closest && e.target.closest('.footer__logo, [data-navigation-status] a[href]');
     if (!link || e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+    if (link.getAttribute('href').startsWith('#')) return; // placeholder and anchor links aren't navigation
     if (link.pathname.replace(/\/$/, '') !== window.location.pathname.replace(/\/$/, '')) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    if (lenis) lenis.scrollTo(0, { duration: 2, easing: gsap.parseEase(WH_EASE) });
-    else window.scrollTo({ top: 0, behavior: 'smooth' });
+    closeNavAnimated(false).then(scrollToTop);
   }, true);
 }
 
@@ -2876,7 +2884,7 @@ function initFullScreenNavigation() {
   });
 
   // b131 — promise-returning close used by the Barba transition.
-  closeNavAnimated = () => new Promise(resolve => {
+  closeNavAnimated = (keepColors = true) => new Promise(resolve => {
     if (navEl.getAttribute('data-navigation-status') !== 'active') return resolve();
     const prev = navTimeline.eventCallback('onReverseComplete');
     let done = false;
@@ -2887,7 +2895,7 @@ function initFullScreenNavigation() {
       resolve();
     };
     navTimeline.eventCallback('onReverseComplete', () => { if (prev) prev(); finish(); });
-    closeNav(true);
+    closeNav(keepColors);
     if (navTimeline.progress() === 0) finish();
     setTimeout(finish, 2500); // safety net
   });
@@ -3076,11 +3084,36 @@ function resumePersistentPlayer(player) {
   var markPlaying = function() {
     player.setAttribute('data-player-status', 'playing');
   };
+  // Real frames on screen, not just a play() that was accepted.
+  var isRunning = function() {
+    return !video.paused && video.readyState >= 2 && video.currentTime > 0;
+  };
 
   nudgeVideoPlayback(video);
 
   video.addEventListener('timeupdate', markPlaying, { once: true });
-  setTimeout(markPlaying, 250);
+
+  // iOS can refuse or freeze a play() that isn't tied to a tap (Low Power
+  // Mode, or a video that was parked out of view). Rather than hide the
+  // poster on a timer and leave nothing behind it, the poster stays until
+  // the video is genuinely running: play() is retried for a few seconds,
+  // and again on the first touch.
+  var tries = 0;
+  var check = function() {
+    if (isRunning()) { markPlaying(); return; }
+    if (player.getAttribute('data-player-status') === 'playing') player.setAttribute('data-player-status', 'ready');
+    if (++tries > 12) return;
+    nudgeVideoPlayback(video);
+    setTimeout(check, 250);
+  };
+  setTimeout(check, 250);
+
+  var retryOnTouch = function() {
+    if (isRunning()) return;
+    var p = video.play();
+    if (p && typeof p.then === 'function') p.catch(function() {});
+  };
+  window.addEventListener('touchstart', retryOnTouch, { once: true, passive: true });
 }
 
 // Reparenting a <video> (moving it to a new DOM parent) rebuilds its
@@ -3161,7 +3194,13 @@ function attachBunnyFrameBridge(player, canvas, video) {
     requestAnimationFrame(function() { requestAnimationFrame(reveal); });
   }
 
-  setTimeout(reveal, 400);
+  // The backstop only lifts the bridge for a video that is actually running.
+  // On iOS a video that won't resume (Low Power Mode, a parked player) would
+  // otherwise be uncovered to nothing; the still stays up until it plays.
+  setTimeout(function() {
+    if (!video || (!video.paused && video.readyState >= 2)) reveal();
+  }, 400);
+  if (video) video.addEventListener('playing', reveal, { once: true });
 }
 
 // Resume + bridge for a player that just got moved (placeholder swap or
