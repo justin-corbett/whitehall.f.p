@@ -108,7 +108,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b249';
+const BUILD = 'b285';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -908,12 +908,15 @@ function prepareOnceAnimation(next) {
     lines,
     stickers: prepareStickerReveal(next),
     images: prepareImageReveal(next),
+    entryImages: prepareEntryImages(next),
     rules: prepareRuleReveal(next)
   };
 }
 
-function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, rules }) {
+function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, entryImages, rules }) {
   playLoadReveal(loadReveal);
+  openEntryWindow(displayLarge);
+  revealEntryImages(entryImages, entryHeadingLines);
   activateLineReveal(lines);
   activateDisplayLargeReveal(displayLarge, lines);
   activateStickerReveal(stickers);
@@ -1016,6 +1019,7 @@ let pendingDisplayLargeReveals = null;
 let pendingStickerReveals = null;
 // b117 — see prepareImageReveal/activateImageReveal.
 let pendingImageReveals = null;
+let pendingEntryImages = null;
 // b143 — see prepareRuleReveal/activateRuleReveal.
 let pendingRuleReveals = null;
 
@@ -1122,6 +1126,7 @@ function runPageLeaveAnimation(current, next) {
       } catch (err) {
         pendingImageReveals = null;
       }
+      pendingEntryImages = prepareEntryImages(next);
       // b143 — horizontal rules draw in from 0 width.
       try {
         pendingRuleReveals = prepareRuleReveal(next);
@@ -1229,6 +1234,8 @@ async function runPageEnterAnimation(next){
     // initGlobalParallax's own scrubbed tween instead, untouched here).
     (pendingImageReveals || []).forEach(({ el }) => gsap.set(el, { opacity: 1, y: 0 }));
     pendingImageReveals = null;
+    (pendingEntryImages || []).forEach(el => gsap.set(el, { clearProps: 'opacity' }));
+    pendingEntryImages = null;
     (pendingRuleReveals || []).forEach(el => gsap.set(el, { scaleX: 1 }));
     pendingRuleReveals = null;
     tl.set(next, { autoAlpha: 1 });
@@ -1283,11 +1290,16 @@ async function runPageEnterAnimation(next){
     // needs it too, to fire the hero's own intro paragraph in the same
     // callback as the title (see both functions' own comments).
     const linePreparedForHero = pendingLineReveals;
+    openEntryWindow(pendingDisplayLargeReveals);
     try {
       activateLineReveal(pendingLineReveals);
     } catch (err) {
     }
     pendingLineReveals = null;
+    // Images in view follow the heading lines; set before the headings fire,
+    // since the intro text keys off whether an image leads.
+    revealEntryImages(pendingEntryImages, entryHeadingLines);
+    pendingEntryImages = null;
     try {
       activateDisplayLargeReveal(pendingDisplayLargeReveals, linePreparedForHero);
     } catch (err) {
@@ -1696,7 +1708,7 @@ function initBarbaNavUpdate(data) {
 //            away to the right, then a fresh line draws in from the left.
 //            A swipe always plays through; if the pointer has moved on by
 //            the time it ends, one more swipe follows.
-const UNDERLINE = { duration: 0.735, wipe: 0.5, ease: WH_EASE, altDelay: 0.3, height: '0.0625em' };
+const UNDERLINE = { duration: 0.735, wipe: 0.5, ease: WH_EASE, altDelay: 0.3, height: '0.0625em', boldHeight: '0.1em' };
 
 function ensureUnderlineStyle() {
   if (document.getElementById('wh-underline-js')) return;
@@ -1710,9 +1722,11 @@ function ensureUnderlineStyle() {
 function makeUnderlineBar(link) {
   const el = document.createElement('span');
   el.setAttribute('aria-hidden', 'true');
+  // The line thickens with the type: bold text gets a heavier underline.
+  const height = parseInt(getComputedStyle(link).fontWeight, 10) >= 600 ? UNDERLINE.boldHeight : UNDERLINE.height;
   el.style.cssText =
     'position:absolute;left:0;bottom:-0.0625em;width:100%;pointer-events:none;background-color:currentColor;' +
-    'height:' + UNDERLINE.height + ';';
+    'height:' + height + ';';
   link.appendChild(el);
   const bar = { el, l: 0, r: 100 };
   bar.apply = () => { el.style.clipPath = 'inset(0 ' + bar.r + '% 0 ' + bar.l + '%)'; };
@@ -1737,7 +1751,6 @@ function underlineWipe(bar, delay) {
 
 function setupUnderline(link) {
   if (link._ul) return link._ul;
-  if (link.closest('[data-navigation-status]')) return null; // the menu has its own underline
   ensureUnderlineStyle();
   link.setAttribute('data-ul-js', '');
   if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
@@ -1907,7 +1920,7 @@ function activateLineReveal(prepared) {
       onEnter: () => {
         // b147 — an inline run is revealed as one unit (see prepareLineReveal).
         if (unit) {
-          gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, ease: DISPLAY_LARGE_ANIM.ease, onStart: () => releaseUnderline(underline) });
+          gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, delay: entryWaitDelay(), ease: DISPLAY_LARGE_ANIM.ease, onStart: () => releaseUnderline(underline) });
           return;
         }
         // b115 — same animation as the display-heading reveal (DISPLAY_LARGE_ANIM):
@@ -1916,6 +1929,7 @@ function activateLineReveal(prepared) {
           opacity: 1,
           y: 0,
           duration: DISPLAY_LARGE_ANIM.duration,
+          delay: entryWaitDelay(),
           ease: DISPLAY_LARGE_ANIM.ease,
           stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" },
           onStart: () => releaseUnderline(underline)
@@ -1939,7 +1953,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
   const CHAR_DURATION = NAV_CHAR_ANIM.duration;
   const CHAR_STAGGER = NAV_CHAR_ANIM.stagger;
   const CHAR_EASE = WH_EASE;
-  const LINKS_START = 0.25;    // when the first link's characters start
+  const LINKS_START = 0.4;     // when the first link's characters start (after the top logo text)
 
   const linkChars = navLinkSplits.flatMap(split => split.chars);
   gsap.set(linkChars, {
@@ -2053,7 +2067,7 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
         }
       };
       tryPlay();
-    }, null, "linksDone-=0.3");
+    }, null, "linksDone-=0.8");
   } else if (navLogoSecondary) {
     tl.to(navLogoSecondary, {
       autoAlpha: 1,
@@ -2061,23 +2075,24 @@ function buildNavTimeline({ tileFill, navUl, navBottom, navLogoText, navLogo, na
       scale: 1,
       duration: 0.7,
       ease: WH_EASE
-    }, "linksDone-=0.3");
+    }, "linksDone-=0.8");
   }
 
-  // Top logo text + bottom links, overlapping the secondary logo.
+  // Opens top to bottom: the top logo text first, then the links (above),
+  // then the secondary logo, then the bottom bar left to right.
   tl.to(topLines, {
     yPercent: 0,
     duration: 0.7,
     ease: WH_EASE,
     stagger: 0.05
-  }, "linksDone-=0.15");
+  }, 0.1);
 
   const bottomTween = tl.to(bottomLines, {
     yPercent: 0,
     duration: 0.7,
     ease: WH_EASE,
-    stagger: 0.05
-  }, "linksDone-=0.15");
+    stagger: 0.12 // left to right across the bar
+  }, "linksDone-=0.3");
 
   // On close the menu logo fades out as the bottom links roll away: this
   // call sits at the end of their tween, which the reverse reaches first.
@@ -2266,8 +2281,8 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const caption = li.querySelector('.nav__image-caption');
     let captionSplit = null;
     if (caption && typeof SplitText !== "undefined") {
-      captionSplit = new SplitText(caption, { type: "lines,words", mask: "lines" });
-      gsap.set(captionSplit.words, { yPercent: 110 });
+      captionSplit = new SplitText(caption, { type: "lines", mask: "lines" });
+      gsap.set(captionSplit.lines, { yPercent: 110 });
     }
 
     // Escapes' alt text ("Coming Soon") rolls in over the link text on hover.
@@ -2365,11 +2380,12 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         gsap.killTweensOf(entry.image);
         gsap.to(entry.image, { clipPath: 'inset(0% 0% 0% 0%)', scale: 1, duration: 0.8, ease: WH_EASE });
         if (entry.captionSplit) {
-          gsap.to(entry.captionSplit.words, {
+          gsap.to(entry.captionSplit.lines, {
             yPercent: 0,
             duration: 0.6,
             ease: WH_EASE,
-            stagger: 0.04
+            stagger: 0.04,
+            overwrite: true
           });
         }
       }, 150);
@@ -2417,11 +2433,14 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
       gsap.to(entry.image, { clipPath: 'inset(100% 0% 0% 0%)', scale: 1.05, duration: 0.5, ease: WH_EASE });
     }
     if (entry.captionSplit) {
-      gsap.to(entry.captionSplit.words, {
+      // Kill the staggered reveal first: its later words would otherwise
+      // start after this tween and pull themselves back in.
+      gsap.to(entry.captionSplit.lines, {
         yPercent: 110,
         duration: 0.4,
         ease: WH_EASE,
-        stagger: 0.03
+        stagger: 0.03,
+        overwrite: true
       });
     }
 
@@ -2701,6 +2720,13 @@ function initFullScreenNavigation() {
   const navLogoText = document.querySelector('.nav__logo-text');
   const navLogo = document.querySelector('.nav__logo');
   const navLogoSecondary = navBottom ? navBottom.querySelector('.nav__logo-secondary') : null;
+  // Menu logo: presses in slightly on hover, back to full size on hover out.
+  if (navLogoSecondary) {
+    const canHover = () => window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    const press = scale => gsap.to(navLogoSecondary, { scale, duration: 0.4, ease: WH_EASE, overwrite: 'auto' });
+    navLogoSecondary.addEventListener('mouseenter', () => { if (canHover()) press(0.95); });
+    navLogoSecondary.addEventListener('mouseleave', () => press(1));
+  }
   const navButton = navEl.querySelector('.nav__button');
   const closeIcon = navButton ? navButton.querySelector('.nav__button__close') : null;
   const menuLabel = navButton ? navButton.querySelector('.nav__button-label') : null;
@@ -2791,6 +2817,20 @@ function initFullScreenNavigation() {
     // to the page's default theme once it's hidden (onReverseComplete).
     resetLinkHovers({ keepColors: true });
     navEl.setAttribute('data-navigation-status', 'not-active');
+    // The menu logo fades shortly after the close starts, ahead of the rest.
+    if (navLogoSecondary) {
+      gsap.to(navLogoSecondary, {
+        autoAlpha: 0,
+        duration: 0.5,
+        delay: 0.2,
+        ease: WH_EASE,
+        overwrite: 'auto',
+        onComplete: () => {
+          const anim = getLottieIn(navLogoSecondary);
+          if (anim) { anim.loop = false; anim.goToAndStop(0, true); }
+        }
+      });
+    }
     // A close for a page transition leaves the logo hidden; the incoming
     // page plays it in (see revealNavLogo).
     if (navLogo && keepColors !== true) {
@@ -3550,6 +3590,8 @@ function initGlobalParallax(scope) {
 
     const ctx = gsap.context(() => {
       root.querySelectorAll('[data-parallax="trigger"]').forEach((trigger) => {
+        // Gallery slides move only with the slider's own drag, not with page scroll.
+        if (trigger.hasAttribute('data-parallax-inner')) return;
         const disable = trigger.getAttribute('data-parallax-disable');
 
         if (
@@ -3560,18 +3602,34 @@ function initGlobalParallax(scope) {
 
         const target = trigger.querySelector('[data-parallax="target"]') || trigger;
         const direction = trigger.getAttribute('data-parallax-direction') || 'vertical';
-        const prop = direction === 'horizontal' ? 'xPercent' : 'yPercent';
+        const horizontal = direction === 'horizontal';
+        const prop = horizontal ? 'x' : 'y';
 
         const scrubAttr = trigger.getAttribute('data-parallax-scrub');
         const startAttr = trigger.getAttribute('data-parallax-start');
         const endAttr = trigger.getAttribute('data-parallax-end');
 
         const scrub = scrubAttr !== null ? parseFloat(scrubAttr) : true;
-        // b116 — subtler default travel (was 20/-20, i.e. 40 total yPercent
-        // of movement edge-to-edge); any element can still override via
-        // data-parallax-start/-end in Webflow.
-        const startVal = startAttr !== null ? parseFloat(startAttr) : 8;
-        const endVal = endAttr !== null ? parseFloat(endAttr) : -8;
+
+        // Default travel fits the image exactly: the target is taller than its
+        // block (e.g. 110%), so the drift runs from the image's top edge
+        // flush with the block's top to its bottom edge flush with the
+        // block's bottom, showing the whole image and never exposing a gap.
+        // Measured from layout (transform cleared) so it holds at any size.
+        // data-parallax-start/-end (in % of the target) still override it.
+        const fitTravel = () => {
+          const previous = target.style.transform;
+          target.style.transform = 'none';
+          const t = target.getBoundingClientRect();
+          const b = trigger.getBoundingClientRect();
+          target.style.transform = previous;
+          const size = horizontal ? t.width : t.height;
+          const box = horizontal ? b.width : b.height;
+          const offset = horizontal ? t.left - b.left : t.top - b.top;
+          return { from: -offset, to: box - size - offset };
+        };
+        const startVal = startAttr !== null ? () => (parseFloat(startAttr) / 100) * (horizontal ? target.offsetWidth : target.offsetHeight) : () => fitTravel().from;
+        const endVal = endAttr !== null ? () => (parseFloat(endAttr) / 100) * (horizontal ? target.offsetWidth : target.offsetHeight) : () => fitTravel().to;
 
         const scrollStart = `clamp(${trigger.getAttribute('data-parallax-scroll-start') || 'top bottom'})`;
         const scrollEnd = `clamp(${trigger.getAttribute('data-parallax-scroll-end') || 'bottom top'})`;
@@ -3584,7 +3642,7 @@ function initGlobalParallax(scope) {
         // tweens fighting over the same property on the same element).
         const scaleStartAttr = trigger.getAttribute('data-parallax-scale-start');
         const scaleEndAttr = trigger.getAttribute('data-parallax-scale-end');
-        const scaleStart = scaleStartAttr !== null ? parseFloat(scaleStartAttr) : 1.05;
+        const scaleStart = scaleStartAttr !== null ? parseFloat(scaleStartAttr) : 1;
         const scaleEnd = scaleEndAttr !== null ? parseFloat(scaleEndAttr) : 1;
 
         gsap.fromTo(target, {
@@ -3598,7 +3656,8 @@ function initGlobalParallax(scope) {
             trigger,
             start: scrollStart,
             end: scrollEnd,
-            scrub
+            scrub,
+            invalidateOnRefresh: true
           }
         });
       });
@@ -3624,9 +3683,10 @@ const DISPLAY_LARGE_ANIM = {
   travelEm: 0.5,
   // b129 — rise for the big hero headings only (they're 144-160px, so 0.5em = 72-80px, far more than body text). Before b128 the hero's rise was converted too early on a fresh load and came out ~1px, so refresh looked subtle while Barba showed the full 0.5em. Tune this one number.
   headingTravelEm: 0.2,
+  headingStagger: 0.12, // between heading lines, so two-line titles land one after the other
   blurPx: 0, // b134 — blur removed from all text/image/sticker reveals (no filter is applied any more)
   duration: 0.7,
-  stagger: 0.018,
+  stagger: 0.05,
   ease: WH_EASE
 };
 
@@ -3747,35 +3807,21 @@ function activateDisplayLargeReveal(prepared, linePrepared) {
           y: 0,
           duration: DISPLAY_LARGE_ANIM.duration,
           ease: DISPLAY_LARGE_ANIM.ease,
-          stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" }
+          stagger: { each: DISPLAY_LARGE_ANIM.headingStagger, from: "start" }
         });
-        if (allLines.length) {
-        }
 
-        // Fire the hero's own intro paragraph (if any) right here, in this
-        // same callback, so it starts on the exact same tick as the title.
-        // syncDuration comes from the tween GSAP just built
-        // (titleTween.duration() — the real, computed total including its
-        // stagger tail), not a hand-recomputed formula, so it can't drift
-        // out of step. Each matched paragraph keeps the site's normal
-        // per-line stagger and solves only its own duration to land on
-        // that same total — floored so a large line count can't push it
-        // negative.
+        // The hero's intro paragraph follows the heading lines (and the
+        // image, when the page has one) instead of starting with them.
         if (heroSection && linePrepared) {
-          const syncDuration = titleTween.duration();
           linePrepared.forEach(entry => {
             if (entry.heroSection !== heroSection) return;
-            // b115 — matches [data-line-reveal]'s own tween now (DISPLAY_LARGE_ANIM's
-            // stagger/ease), not the old LINE_REVEAL_STAGGER/"expo.out" pairing.
-            const stagger = DISPLAY_LARGE_ANIM.stagger;
-            const lineCount = entry.split.lines.length;
-            const duration = Math.max(0.4, syncDuration - Math.max(0, lineCount - 1) * stagger);
             gsap.to(entry.split.lines, {
               opacity: 1,
               y: 0,
-              duration: duration,
+              duration: DISPLAY_LARGE_ANIM.duration,
+              delay: entryFollowDelay(allLines.length) + (entryHasImages ? ENTRY_TEXT_AFTER_IMAGE : 0),
               ease: DISPLAY_LARGE_ANIM.ease,
-              stagger: { each: stagger, from: "start" },
+              stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" },
               onStart: () => releaseUnderline(entry.underline)
             });
           });
@@ -3861,6 +3907,7 @@ function activateStickerReveal(prepared) {
           opacity: 1,
           y: 0,
           duration: DISPLAY_LARGE_ANIM.duration,
+          delay: entryStickerDelay(),
           ease: DISPLAY_LARGE_ANIM.ease
         });
       }
@@ -3904,98 +3951,98 @@ function prepareImageReveal(scope) {
   // rise + fade-in as the images, without any parallax (it isn't a
   // [data-parallax] element, so initGlobalParallax leaves it alone).
   // b149 — and every .btn, so buttons reveal the same way.
-  const targets = (scope || document).querySelectorAll('[data-parallax="trigger"], .contact__map, .btn');
+  // Images no longer reveal on entry (no fade, no rise); only the map and
+  // buttons do. Images keep their scrubbed parallax drift.
+  const targets = (scope || document).querySelectorAll('.contact__map, .btn');
   const prepared = [];
   targets.forEach(trigger => {
-    // Same target resolution as initGlobalParallax (a '[data-parallax="target"]'
-    // child if one exists, else the trigger itself), so this reveal and the
-    // continuous parallax scrub always land on the identical element.
-    // Slider visuals are the exception: Smooothy rewrites their transform
-    // every frame, so the rise goes on the image inside them instead.
-    const el = trigger.hasAttribute('data-parallax-inner')
-      ? (trigger.querySelector('.parallax-slider__item-img') || trigger)
-      : (trigger.querySelector('[data-parallax="target"]') || trigger);
-    // Images rise without fading; buttons and the map still fade in.
-    const fades = !trigger.matches('[data-parallax="trigger"]');
-    gsap.set(el, {
-      ...(fades && { opacity: 0 }),
-      y: `${IMAGE_REVEAL_RISE_REM}rem`,
-    });
+    const el = trigger.querySelector('[data-parallax="target"]') || trigger;
+    gsap.set(el, { opacity: 0, y: `${IMAGE_REVEAL_RISE_REM}rem` });
     prepared.push({ el, trigger });
   });
   return prepared;
 }
 
-// Images (and buttons) entering the viewport together share one queue, so a
-// row of images reveals one after another instead of all at once. Based on
-// Osmo's Queued Scroll Reveal.
-const IMAGE_QUEUE_MAX = 12; // beyond this, extra items reveal immediately
-const IMAGE_QUEUE_DELAY = 0.1; // seconds between entering and the queue starting
-const IMAGE_QUEUE_STAGGER = 0.075; // seconds between each item starting
+// After a page transition the headings rise in first and the images below
+// them follow: images already in view when the page appears are held
+// hidden, then fade in once the headings are under way.
+const ENTRY_FOLLOW_GAP = 0.3; // seconds after the last heading line starts
+const ENTRY_TEXT_AFTER_IMAGE = 0.15; // extra wait for the intro text when an image leads
+let entryHasImages = false;
 
-let imageRevealQueue = [];
-let imageRevealRunning = false;
-let imageRevealCall = null;
+// When whatever follows the headings should start, measured from the moment
+// the headings do: after the last of their lines has begun.
+function entryFollowDelay(lineCount) {
+  return Math.max(0, lineCount - 1) * DISPLAY_LARGE_ANIM.headingStagger + ENTRY_FOLLOW_GAP;
+}
+
+// For a short window while a page appears, any text reveal that fires on its
+// own (e.g. the paragraph under the main heading) waits for the hero heading
+// lines to finish starting, rather than animating alongside them.
+let entryHeadingLines = 0;
+let entryWindowUntil = 0;
+
+function openEntryWindow(displayPrepared) {
+  entryHeadingLines = Math.max(0, ...(displayPrepared || []).filter(p => p.heroSection).map(p => p.splits.flatMap(sp => sp.lines).length));
+  entryWindowUntil = performance.now() + 600;
+}
+
+// Stickers in view on entry arrive last: after the heading and the text that
+// follows it.
+const ENTRY_STICKER_GAP = 0.4;
+function entryStickerDelay() {
+  return performance.now() < entryWindowUntil
+    ? entryFollowDelay(entryHeadingLines) + ENTRY_STICKER_GAP + (entryHasImages ? ENTRY_TEXT_AFTER_IMAGE : 0)
+    : 0;
+}
+
+function entryWaitDelay() {
+  return entryHeadingLines && performance.now() < entryWindowUntil ? entryFollowDelay(entryHeadingLines) : 0;
+}
+const ENTRY_IMAGE_FADE = 0.9;
+
+function prepareEntryImages(scope) {
+  const held = [];
+  scope.querySelectorAll('[data-parallax="trigger"]').forEach(trigger => {
+    if (trigger.hasAttribute('data-parallax-inner')) return; // gallery slides appear as they are
+    const rect = trigger.getBoundingClientRect();
+    if (rect.top > window.innerHeight * 0.9 || rect.bottom < 0) return;
+    const el = trigger.querySelector('[data-parallax="target"]') || trigger;
+    gsap.set(el, { opacity: 0 });
+    held.push(el);
+  });
+  return held;
+}
+
+function revealEntryImages(held, headingLines) {
+  entryHasImages = !!(held && held.length);
+  if (!entryHasImages) return;
+  gsap.to(held, {
+    opacity: 1,
+    duration: ENTRY_IMAGE_FADE,
+    delay: 0.15 + entryFollowDelay(headingLines),
+    ease: WH_EASE,
+    stagger: 0.1,
+    clearProps: 'opacity'
+  });
+}
 
 function revealImage(el) {
   gsap.to(el, {
-    opacity: 1, // no-op for images, which never fade
+    opacity: 1,
     y: 0,
     duration: DISPLAY_LARGE_ANIM.duration,
     ease: DISPLAY_LARGE_ANIM.ease
   });
 }
 
-// Triggers fire in whatever order their own start positions are crossed, so
-// side-by-side images that sit at slightly different heights (or are nudged
-// by parallax) can arrive right-first. Each pick takes the top-most row, and
-// the left-most image within it.
-const IMAGE_ROW_TOLERANCE = 80; // px — images this close vertically count as one row
-
-function takeNextImage() {
-  imageRevealQueue.sort((a, b) => {
-    const ra = a.trigger.getBoundingClientRect();
-    const rb = b.trigger.getBoundingClientRect();
-    return Math.abs(ra.top - rb.top) > IMAGE_ROW_TOLERANCE ? ra.top - rb.top : ra.left - rb.left;
-  });
-  return imageRevealQueue.shift();
-}
-
-function revealNextImage() {
-  const next = takeNextImage();
-  if (!next) {
-    imageRevealRunning = false;
-    return;
-  }
-  revealImage(next.el);
-  imageRevealCall = gsap.delayedCall(IMAGE_QUEUE_STAGGER, revealNextImage);
-}
-
-function queueImageReveal(el, trigger) {
-  imageRevealQueue.push({ el, trigger });
-  if (imageRevealQueue.length > IMAGE_QUEUE_MAX) revealImage(takeNextImage().el);
-  if (imageRevealRunning) return;
-  imageRevealRunning = true;
-  imageRevealCall = gsap.delayedCall(IMAGE_QUEUE_DELAY, revealNextImage);
-}
-
 function activateImageReveal(prepared) {
-  // A fresh page starts with an empty queue.
-  if (imageRevealCall) imageRevealCall.kill();
-  imageRevealQueue = [];
-  imageRevealRunning = false;
-
   (prepared || []).forEach(({ el, trigger }) => {
     ScrollTrigger.create({
       trigger: trigger,
       start: 'top 90%',
       once: true,
-      onEnter: () => {
-        // Slides scrolled off-screen sideways would only clog the queue.
-        const rect = trigger.getBoundingClientRect();
-        if (rect.right < 0 || rect.left > window.innerWidth) revealImage(el);
-        else queueImageReveal(el, trigger);
-      }
+      onEnter: () => revealImage(el)
     });
   });
 }
@@ -4057,7 +4104,7 @@ function initHeroAboutParallax(scope) {
 const LOAD_TEXT_REVEAL = {
   duration: 0.7,
   ease: WH_EASE,
-  stagger: 0.018,
+  stagger: 0.05,
   travel: 60,   // yPercent
   rotate: 90    // degrees
 };
@@ -4329,9 +4376,8 @@ const COLOR_ZONES = [
     btn: { bg: COLORS.spring, text: COLORS.forest }
   }
 ];
-// b136 — zone colour change speed (bg, text, nav, zone buttons). Was 0.6s;
-// shortened to feel as snappy as the nav-link hover colour change.
-const COLOR_ZONE_DURATION = 0.3;
+// Zone colour change speed (bg, text, nav, zone buttons).
+const COLOR_ZONE_DURATION = 0.6;
 let colorZoneSTs = [];
 
 function initColorZones(scope) {
@@ -4573,8 +4619,9 @@ function initButtonHoverFocus(scope) {
 let activeParallaxSliders = [];
 
 function destroyParallaxImageSliders() {
-  activeParallaxSliders.forEach(({ slider, tick }) => {
+  activeParallaxSliders.forEach(({ slider, tick, teardown }) => {
     gsap.ticker.remove(tick);
+    if (teardown) teardown();
     if (slider && typeof slider.destroy === 'function') slider.destroy();
   });
   activeParallaxSliders = [];
@@ -4711,37 +4758,36 @@ function initSliderStickers(slides, decadeKeys) {
   });
 }
 
-// b108 — per-slide image format (Our Story). .parallax-slider__item-inner
-// used to carry one fixed aspect-ratio for every slide; now it carries
-// none of its own, and one of three combo classes — is--landscape
-// (3/2), is--square (1/1), is--portrait (2/3), added in Webflow — is
-// picked per slide from that slide's own image's REAL dimensions
-// (.parallax-slider__item-img's naturalWidth/naturalHeight), not the
-// container. Runs once per slide, on init — an image already loaded
-// (from cache, or because it was already in the viewport) is classified
-// immediately; one still loading is classified on its own load event.
-const IMAGE_FORMAT_CLASSES = ['is--landscape', 'is--square', 'is--portrait'];
-
-function classifySliderImageFormat(inner, img) {
-  const w = img.naturalWidth;
-  const h = img.naturalHeight;
-  if (!w || !h) return;
-  const ratio = w / h;
-  const formatClass = ratio > 1.05 ? 'is--landscape' : ratio < 0.95 ? 'is--portrait' : 'is--square';
-  inner.classList.remove(...IMAGE_FORMAT_CLASSES);
-  inner.classList.add(formatClass);
+// Gallery slides (Our Story) are a fixed height; each slide's width follows
+// its image's own proportions, so landscape, square and portrait photos all
+// sit at their natural shape. The ratio comes from the image's real
+// dimensions (its width/height attributes until it has loaded, then its
+// natural size) and is applied as the slide's aspect-ratio; the CSS keeps
+// the height fixed and a 3/2 fallback until then.
+function sliderImageRatio(img) {
+  const w = img.naturalWidth || parseFloat(img.getAttribute('width'));
+  const h = img.naturalHeight || parseFloat(img.getAttribute('height'));
+  return w && h ? w / h : 0;
 }
 
-function initSliderImageFormats(slides) {
+function initSliderImageFormats(slides, onChange) {
   slides.forEach((slide) => {
     const inner = slide.querySelector('.parallax-slider__item-inner');
     const img = slide.querySelector('.parallax-slider__item-img');
     if (!inner || !img) return;
-    if (img.complete && img.naturalWidth) {
-      classifySliderImageFormat(inner, img);
-    } else {
-      img.addEventListener('load', () => classifySliderImageFormat(inner, img), { once: true });
-    }
+    // Lazy images would pop in (and re-measure the slider) mid-drag; load
+    // the whole gallery up front instead.
+    img.loading = 'eager';
+    const apply = () => {
+      const ratio = sliderImageRatio(img);
+      if (!ratio) return;
+      const value = ratio.toFixed(4);
+      if (inner.style.aspectRatio === value) return;
+      inner.style.aspectRatio = value;
+      if (onChange) onChange();
+    };
+    apply();
+    if (!img.complete) img.addEventListener('load', apply, { once: true });
   });
 }
 
@@ -4772,12 +4818,8 @@ function initParallaxImageSlider(scope) {
     });
     const decadeTimeline = initDecadeTimelinePanels(scope, decadeKeys);
     initSliderStickers(slides, decadeKeys);
-    // b109 — paused for now: reverted the Webflow side back to every
-    // image being the fixed landscape (3/2) box it always was. The
-    // function itself (initSliderImageFormats, above) and its Webflow
-    // combo classes are left in place, untouched, so this is a one-line
-    // re-enable rather than rebuilding it later.
-    // initSliderImageFormats(slides);
+    let slider = null; // assigned below; slide widths changing re-measures it
+    initSliderImageFormats(slides, () => { if (slider) slider.resize(); });
     let decadeTickCount = 0;
 
     // Parallax amount
@@ -4796,66 +4838,130 @@ function initParallaxImageSlider(scope) {
 
     const maxOffset = 25;
 
-    // b104 — corrects a real bug in how Smooothy positions slides when
-    // they're spaced with margin instead of padding (confirmed by reading
-    // the actual published package, smooothy@0.0.35's dist/esm.js — not
-    // just its docs, which describe options that turned out not to touch
-    // this at all). Smooothy assumes every slide sits exactly one
-    // itemWidth apart and translates every slide by the SAME px value,
-    // `current * itemWidth` (see #J() in its source), where itemWidth is
-    // only ever measured from getBoundingClientRect(), which does NOT
-    // include a slide's own margin. This site's .parallax-slider__item
-    // has a margin-right between slides (Osmo's own docs actually warn
-    // against exactly this — "avoid using gaps; wrap slides in divs with
-    // padding applied to those wrapper elements" — but this track uses a
-    // margin instead), so Smooothy's shift is one slide-width-worth short
-    // of the real per-slide distance, and that shortfall accumulates by
-    // one slide's worth of margin per index — which is exactly why the
-    // very first slide always lines up and it drifts further the deeper
-    // you scroll.
-    //
-    // b103 fixed that by subtracting the accumulated shortfall back out
-    // per slide, but that also cancels the margin itself out of the
-    // rendered gap between adjacent slides — the alignment was right but
-    // the gap disappeared. The real fix: replace Smooothy's per-slide
-    // step (itemWidth alone) with the REAL step (itemWidth + the actual
-    // margin), applied as the same single shift to every slide, exactly
-    // like Smooothy's own code does — that keeps the natural gap intact
-    // while still landing the active slide flush with the text column.
-    // realStepPx/itemWidthPx are both measured once, pre-transform, at
-    // init. Only meaningful for the non-infinite, non-variableWidth
-    // branch of Smooothy's source (#J()) that this instance uses —
-    // infinite mode's wraparound math (#Q()) is left untouched. Where
-    // slides truly are itemWidth apart already (no margin/gap), the scale
-    // factor comes out to 1 and this changes nothing.
-    const itemWidthPx = !infinite && slides[0] ? slides[0].getBoundingClientRect().width : 0;
-    const realStepPx = itemWidthPx && slides.length > 1
-      ? slides[1].getBoundingClientRect().left - slides[0].getBoundingClientRect().left
-      : itemWidthPx;
-    const stepScale = itemWidthPx ? realStepPx / itemWidthPx : 1;
+    // Slides differ in width (each follows its image's proportions), so a
+    // non-infinite slider runs Smooothy in variableWidth mode. Every slide is
+    // then translated by the same amount and keeps its natural place in the
+    // flex row; what Smooothy needs from us is where each slide really
+    // starts. Its own measure ignores the margin between slides and centres
+    // the active slide in the wrapper, so after every measure the geometry is
+    // replaced with the real layout: slide starts from offsetLeft, and each
+    // slide counted as wrapper-wide so snapping lands its left edge on the
+    // text column, as it always has.
+    const variableWidth = !infinite;
+    const syncSlideGeometry = (core) => {
+      if (!variableWidth || !slides.length) return;
+      const first = slides[0].offsetLeft;
+      const offsets = slides.map((slide) => slide.offsetLeft - first);
+      core.itemOffsets = offsets;
+      core.itemWidths = slides.map(() => core.viewport.wrapperWidth);
+      core.viewport.totalWidth = offsets[offsets.length - 1] + slides[slides.length - 1].offsetWidth;
+      core.maxScroll = -offsets[offsets.length - 1];
+    };
 
-    const slider = new Smooothy(wrapper, {
+    // A re-measure (lazy images settling the slide widths as the gallery
+    // nears the viewport, a window resize) makes Smooothy re-target the
+    // wrong slide, which plays as the whole gallery sliding in. The next
+    // frame puts the slider straight back on the slide it was resting on.
+    let snapAfterResize = false;
+    let settledIndex = 0;
+    let pressScale = 1; // see the drag block; read by onUpdate below
+    let beforeResize = { current: 0, target: 0 };
+
+    slider = new Smooothy(wrapper, {
       infinite,
       snap,
+      variableWidth,
       lerpFactor: lerp,
+      onResize: (core) => {
+        syncSlideGeometry(core);
+        // onResize runs before Smooothy re-targets, so this is still the
+        // live position.
+        beforeResize = { current: core.current, target: core.target };
+        snapAfterResize = true;
+      },
       onUpdate: ({ parallaxValues }) => {
         parallaxItems.forEach((item, i) => {
           if (!item) return;
           const offset = gsap.utils.clamp(-maxOffset, maxOffset, parallaxValues[i] * amount);
-          item.style.transform = `translateX(${offset}%)`;
+          // The same element is counter-scaled while a slide is held (see the
+          // drag block), so both live in this one transform string.
+          item.style.transform = `translateX(${offset}%) scale(${1 / pressScale})`;
         });
-
-        // b104 — re-apply Smooothy's own shift to every slide, scaled up
-        // from "one itemWidth per slide" to "one real step (itemWidth +
-        // margin) per slide".
-        if (stepScale !== 1 && parallaxValues.length) {
-          const shift = parallaxValues[0] * stepScale;
-          slides.forEach((slide) => {
-            slide.style.transform = `translateX(${shift}px)`;
-          });
-        }
       },
     });
+    syncSlideGeometry(slider);
+
+    // Drag feel. Smooothy only advances a slide once it has been dragged past
+    // the halfway point, which on slides this wide means a long drag (worse
+    // still with a thumb on a phone). So a release is judged on intent
+    // instead: a short drag or a flick moves exactly one slide in that
+    // direction, from the slide the drag began on. Runs after Smooothy's own
+    // release handling, so it has the last word on the target.
+    const sliderTeardowns = [];
+    if (variableWidth) {
+      wrapper.style.touchAction = 'pan-y'; // vertical page scroll stays native; horizontal belongs to the slider
+      const DRAG_DISTANCE = 36; // px
+      const FLICK_SPEED = 0.35; // px per ms
+      // Held slides close in like a mask: the frame narrows while the picture
+      // inside is counter-scaled so it holds still, and the settle is
+      // per-frame exponential (closer to 1 is slower), same as the Finlay
+      // Woods gallery.
+      const PRESS_SCALE = 0.95;
+      const PRESS_SETTLE = 0.955; // per 60fps frame
+      const pressItems = slides
+        .map((slide) => ({
+          frame: slide.querySelector('.parallax-slider__item-inner'),
+          caption: slide.querySelector('.image__caption__wrap')
+        }))
+        .filter((item) => item.frame);
+      let pressTarget = 1;
+      const pressTick = (time, delta) => {
+        if (pressScale === pressTarget) return;
+        pressScale += (pressTarget - pressScale) * (1 - Math.pow(PRESS_SETTLE, delta / 16.667));
+        if (Math.abs(pressTarget - pressScale) < 0.0005) pressScale = pressTarget;
+        pressItems.forEach(({ frame, caption }) => {
+          gsap.set(frame, { scale: pressScale });
+          // Captions track the frame's left and bottom edges as it closes in.
+          if (caption) {
+            gsap.set(caption, {
+              x: (frame.offsetWidth * (1 - pressScale)) / 2,
+              y: -(frame.offsetHeight * (1 - pressScale)) / 2
+            });
+          }
+        });
+      };
+      gsap.ticker.add(pressTick);
+      let drag = null;
+      const point = (e) => (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+      const begin = (e) => {
+        drag = { x: point(e).clientX, t: performance.now(), slide: slider.currentSlide };
+        pressTarget = PRESS_SCALE;
+      };
+      const finish = (e) => {
+        if (!drag) return;
+        const dx = point(e).clientX - drag.x;
+        const speed = Math.abs(dx) / Math.max(1, performance.now() - drag.t);
+        const from = drag.slide;
+        drag = null;
+        pressTarget = 1;
+        if (Math.abs(dx) < DRAG_DISTANCE && speed < FLICK_SPEED) {
+          slider.goToIndex(from);
+        } else {
+          slider.goToIndex(from + (dx < 0 ? 1 : -1));
+        }
+      };
+      wrapper.addEventListener('mousedown', begin);
+      wrapper.addEventListener('touchstart', begin, { passive: true });
+      window.addEventListener('mouseup', finish);
+      window.addEventListener('touchend', finish);
+      window.addEventListener('touchcancel', finish);
+      sliderTeardowns.push(() => {
+        gsap.ticker.remove(pressTick);
+        window.removeEventListener('mouseup', finish);
+        window.removeEventListener('touchend', finish);
+        window.removeEventListener('touchcancel', finish);
+      });
+    }
 
     // Smooothy's own internal "last update" timestamp starts at 0, not the
     // moment the instance is created — so its very first update() call
@@ -4864,16 +4970,53 @@ function initParallaxImageSlider(scope) {
     // jumps almost all the way to `target` in a single frame instead of
     // animating smoothly. init() resets that timestamp to now, so the
     // first real update() behaves like any other frame.
+    slider.current = slider.target;
     slider.init();
 
     // Same fix as above, but for every time the slider becomes visible
     // again after a stretch of being invisible (scrolled past, then back
     // to). isVisible is a plain public field Smooothy updates from its own
     // IntersectionObserver, polled here without touching its internals.
+    // The decade description waits for the gallery to scroll into view, then
+    // reveals like the other text; after that it switches with the slides.
+    let decadeLive = false;
+    const decadeTrigger = decadeTimeline && hasScrollTrigger
+      ? ScrollTrigger.create({ trigger: wrapper, start: 'top 90%', once: true, onEnter: () => { decadeLive = true; } })
+      : null;
+    if (decadeTimeline && !decadeTrigger) decadeLive = true;
+    sliderTeardowns.push(() => decadeTrigger && decadeTrigger.kill());
+
     let wasVisible = slider.isVisible;
     const tick = () => {
-      if (slider.isVisible && !wasVisible) slider.init();
+      if (slider.isVisible && !wasVisible) {
+        // Land on the target outright: current can be stale from the
+        // geometry sync, and lerping out of it plays as the whole
+        // gallery sliding in from the left.
+        slider.current = slider.target;
+        slider.init();
+      }
       wasVisible = slider.isVisible;
+      if (snapAfterResize) {
+        snapAfterResize = false;
+        if (slider.isDragging) {
+          // Mid-drag the finger owns the position: undo the re-target only.
+          slider.current = beforeResize.current;
+          slider.target = beforeResize.target;
+        } else {
+          const rest = gsap.utils.clamp(slider.maxScroll, 0, -slider.itemOffsets[settledIndex]);
+          slider.current = rest;
+          slider.target = rest;
+        }
+      } else {
+        // Nearest slide to where the slider is headed, by our own offsets;
+        // Smooothy's currentSlide measures against wrapper-wide slides and
+        // reads one ahead.
+        let nearest = 0;
+        slider.itemOffsets.forEach((offset, i) => {
+          if (Math.abs(offset + slider.target) < Math.abs(slider.itemOffsets[nearest] + slider.target)) nearest = i;
+        });
+        settledIndex = nearest;
+      }
       slider.update();
 
       // b100 — real geometry, not Smooothy internals: whichever slide's
@@ -4896,10 +5039,10 @@ function initParallaxImageSlider(scope) {
         decadeTickCount++;
         if (decadeTickCount % 30 === 0) {
         }
-        if (bestIndex !== -1) decadeTimeline.showDecade(decadeKeys[bestIndex]);
+        if (decadeLive && bestIndex !== -1) decadeTimeline.showDecade(decadeKeys[bestIndex]);
       }
     };
     gsap.ticker.add(tick);
-    activeParallaxSliders.push({ slider, tick });
+    activeParallaxSliders.push({ slider, tick, teardown: () => sliderTeardowns.forEach((fn) => fn()) });
   });
 }
