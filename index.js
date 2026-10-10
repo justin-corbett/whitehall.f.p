@@ -108,7 +108,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b288';
+const BUILD = 'b289';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -1821,8 +1821,27 @@ function releaseUnderline(link) {
   if (state.alt && !state.swiping) underlineGrow(state.main, UNDERLINE.altDelay);
 }
 
+// An inline run like "Send your CV to / email link / and we'll get back to
+// you" is spaced in the Designer with margins on the link, and there is no
+// whitespace between the elements. Without whitespace the browser has no
+// place to break between them, so "to" and the address (and the address and
+// "and") are glued into one unbreakable chunk and wrap in odd places. Real
+// spaces go in between, and the link margins that stood in for them go out.
+function spaceInlineRuns(scope) {
+  (scope || document).querySelectorAll('[data-line-reveal]').forEach(el => {
+    if (getComputedStyle(el).display !== 'inline') return;
+    const next = el.nextSibling;
+    const sibling = next && next.nodeType === 1 ? next : null;
+    if (!sibling || getComputedStyle(sibling).display !== 'inline') return;
+    if (el.tagName === 'A') el.style.marginRight = '0';
+    if (sibling.tagName === 'A') sibling.style.marginLeft = '0';
+    el.after(document.createTextNode(' '));
+  });
+}
+
 function prepareLineReveal(scope) {
   if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
+  spaceInlineRuns(scope);
 
   // Rich text ([data-line-reveal-children], e.g. the legal pages' CMS body)
   // reveals block by block: each paragraph, heading and list item gets its
