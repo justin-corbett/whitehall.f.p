@@ -108,7 +108,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b285';
+const BUILD = 'b288';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -1832,7 +1832,10 @@ function prepareLineReveal(scope) {
     .filter(block => block.textContent.trim());
   const richSet = new Set(richBlocks);
   const defaultStart = el => el.getAttribute('data-line-reveal-start') || (richSet.has(el) ? 'top 90%' : 'top 85%');
-  const targets = [...(scope || document).querySelectorAll('[data-line-reveal]'), ...richBlocks];
+  // [data-decade-text] is the exception: the decade panels split and reveal it
+  // themselves (initDecadeTimelinePanels), and its panel is display:none until
+  // shown, so a trigger here would fire on a zero-height box.
+  const targets = [...(scope || document).querySelectorAll('[data-line-reveal]:not([data-decade-text])'), ...richBlocks];
   const prepared = [];
   // b147 — INLINE [data-line-reveal] pieces (display:inline, e.g. the "Send
   // your CV to / email link / and we'll get back to you" run on Contact,
@@ -4658,6 +4661,36 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
   });
   if (!panels.size) return null;
 
+  // The list is as tall as the tallest panel, so switching decades never
+  // shifts the layout below it. Each panel is shown briefly to measure it,
+  // and the fit is redone when the list's width changes (text reflows) and
+  // once fonts have loaded.
+  const list = [...panels.values()][0].item.parentElement;
+  const fitListHeight = () => {
+    if (!list.isConnected) return;
+    list.style.minHeight = '';
+    let tallest = 0;
+    panels.forEach(({ item }) => {
+      const display = item.style.display;
+      item.style.display = '';
+      tallest = Math.max(tallest, item.offsetHeight);
+      item.style.display = display;
+    });
+    list.style.minHeight = `${tallest}px`;
+  };
+  fitListHeight();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitListHeight);
+  if (typeof ResizeObserver !== 'undefined') {
+    let lastWidth = list.offsetWidth;
+    const observer = new ResizeObserver(() => {
+      if (!list.isConnected) return observer.disconnect();
+      if (list.offsetWidth === lastWidth) return;
+      lastWidth = list.offsetWidth;
+      fitListHeight();
+    });
+    observer.observe(list);
+  }
+
   // b107 — the exit half of the transition (below) runs quicker than the
   // site-standard LINE_REVEAL_DURATION/STAGGER used for the roll-in, since
   // it's a brief "get out of the way" beat rather than a second reveal.
@@ -4770,6 +4803,21 @@ function sliderImageRatio(img) {
   return w && h ? w / h : 0;
 }
 
+// Slide widths are set outright from each picture's ratio and the fixed
+// height, rather than left to auto: on phones an auto width could settle
+// before the ratio did (or grow to a long caption), leaving a gap after the
+// image. Called on every measure so a resize or rotation re-fits them.
+function fitSliderWidths(slides) {
+  slides.forEach((slide) => {
+    const inner = slide.querySelector('.parallax-slider__item-inner');
+    const ratio = inner && parseFloat(inner.dataset.ratio);
+    if (!ratio) return;
+    const width = `${inner.offsetHeight * ratio}px`;
+    inner.style.width = width;
+    slide.style.width = width;
+  });
+}
+
 function initSliderImageFormats(slides, onChange) {
   slides.forEach((slide) => {
     const inner = slide.querySelector('.parallax-slider__item-inner');
@@ -4784,6 +4832,7 @@ function initSliderImageFormats(slides, onChange) {
       const value = ratio.toFixed(4);
       if (inner.style.aspectRatio === value) return;
       inner.style.aspectRatio = value;
+      inner.dataset.ratio = value;
       if (onChange) onChange();
     };
     apply();
@@ -4850,6 +4899,7 @@ function initParallaxImageSlider(scope) {
     const variableWidth = !infinite;
     const syncSlideGeometry = (core) => {
       if (!variableWidth || !slides.length) return;
+      fitSliderWidths(slides);
       const first = slides[0].offsetLeft;
       const offsets = slides.map((slide) => slide.offsetLeft - first);
       core.itemOffsets = offsets;
@@ -4977,11 +5027,11 @@ function initParallaxImageSlider(scope) {
     // again after a stretch of being invisible (scrolled past, then back
     // to). isVisible is a plain public field Smooothy updates from its own
     // IntersectionObserver, polled here without touching its internals.
-    // The decade description waits for the gallery to scroll into view, then
-    // reveals like the other text; after that it switches with the slides.
+    // The decade description waits until its own spot scrolls into view (85%,
+    // like [data-line-reveal]), then reveals the same way; after that it switches with the slides.
     let decadeLive = false;
     const decadeTrigger = decadeTimeline && hasScrollTrigger
-      ? ScrollTrigger.create({ trigger: wrapper, start: 'top 90%', once: true, onEnter: () => { decadeLive = true; } })
+      ? ScrollTrigger.create({ trigger: root.querySelector('.slider__timeline__list') || (scope || document).querySelector('.slider__timeline__list') || wrapper, start: 'top 85%', once: true, onEnter: () => { decadeLive = true; } })
       : null;
     if (decadeTimeline && !decadeTrigger) decadeLive = true;
     sliderTeardowns.push(() => decadeTrigger && decadeTrigger.kill());
