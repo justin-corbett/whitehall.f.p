@@ -107,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b313';
+const BUILD = 'b314';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -3404,14 +3404,17 @@ function reclaimParkedBunnyPlayer(placeholder) {
 const BG_MIN_HEIGHT = 480;
 // Rendition the video starts on (the first one at least this tall, or the
 // tallest there is). Adaptive bitrate takes over after the first segment.
-const BG_START_HEIGHT = 720;
-// A parked/preloaded video isn't on screen yet, so it loads at the best
+const BG_START_HEIGHT = 480;
+// Tallest rendition it may climb to. A looping background behind text doesn't
+// need 1080p, and the top rendition is several times the bytes of 720p: it
+// was ~36 MB of the page's ~38 MB, which is what held Speed Index back. A
+// parked/preloaded video isn't on screen yet, so it loads at the best
 // rendition up to this height instead of climbing from the minimum.
-const BG_PRELOAD_MAX_HEIGHT = 1080;
+const BG_MAX_HEIGHT = 720;
 // How much of the clip hls.js may hold, in seconds and bytes (the defaults
 // are 30s / 60MB, which a longer or high-bitrate clip would hit).
-const BG_BUFFER_SECONDS = 180;
-const BG_BUFFER_BYTES = 250 * 1000 * 1000;
+const BG_BUFFER_SECONDS = 60;
+const BG_BUFFER_BYTES = 100 * 1000 * 1000;
 
 function initBunnyPlayerBackground(scope) {
   (scope || document).querySelectorAll('[data-bunny-background-init]').forEach(function(player) {
@@ -3503,13 +3506,19 @@ function initBunnyPlayerBackground(scope) {
           for (var i = 0; i < hls.levels.length; i++) {
             if (hls.levels[i].height >= BG_MIN_HEIGHT) { minIdx = i; break; }
           }
+          // Never climb above BG_MAX_HEIGHT (the tallest level at or under it).
+          var maxIdx = -1;
+          for (var m = 0; m < hls.levels.length; m++) {
+            if (hls.levels[m].height <= BG_MAX_HEIGHT && (maxIdx < 0 || hls.levels[m].height >= hls.levels[maxIdx].height)) maxIdx = m;
+          }
+          if (maxIdx > -1) hls.autoLevelCapping = maxIdx;
           // Preloaded while parked behind another page: nobody is watching it
           // load, so fetch the best rendition straight away and keep it pinned
           // until the player is handed back (see reclaimParkedBunnyPlayer).
           if (player.hasAttribute('data-bunny-preload')) {
             var bestIdx = -1;
             for (var j = 0; j < hls.levels.length; j++) {
-              if (hls.levels[j].height <= BG_PRELOAD_MAX_HEIGHT && (bestIdx < 0 || hls.levels[j].height >= hls.levels[bestIdx].height)) bestIdx = j;
+              if (hls.levels[j].height <= BG_MAX_HEIGHT && (bestIdx < 0 || hls.levels[j].height >= hls.levels[bestIdx].height)) bestIdx = j;
             }
             if (bestIdx > -1) {
               hls.startLevel = bestIdx;
