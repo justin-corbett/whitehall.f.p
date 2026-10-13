@@ -107,8 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b317';
-console.log('[build]', BUILD);
+const BUILD = 'b319';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -151,6 +150,7 @@ function addConsoleBrand() {
   );
 }
 addConsoleBrand();
+console.log('[build]', BUILD);
 
 
 
@@ -803,11 +803,9 @@ function settleNavLogo(release) {
         const elapsed = performance.now() - navLogoPlayStart;
         const total = anim.getDuration() * 1000;
         if (navLogoPlayStart && elapsed < total) {
-          console.log('[logo] resume after rebuild', { elapsed: Math.round(elapsed), total: Math.round(total) });
           anim.setDirection(1);
           anim.goToAndPlay(elapsed, false);
         } else {
-          console.log('[logo] rest on last frame after rebuild', { elapsed: Math.round(elapsed), total: Math.round(total) });
           anim.goToAndStop(anim.totalFrames - 1, true);
         }
         requestAnimationFrame(release);
@@ -817,7 +815,6 @@ function settleNavLogo(release) {
     } else if (performance.now() - started < 3000) {
       requestAnimationFrame(check);
     } else {
-      console.log('[logo] rebuilt Lottie not found after 3s');
       release();
     }
   };
@@ -827,7 +824,6 @@ function settleNavLogo(release) {
 function resetWebflowForms() {
   const w = window.Webflow;
   if (!w) return;
-  console.log('[logo] webflow reset: hold logo', { shown: navLogoWasShown, sinceLastPlayMs: Math.round(performance.now() - navLogoPlayStart) });
   const releaseLogo = holdNavLogo();
   w.destroy();
   w.ready();
@@ -1367,7 +1363,6 @@ async function runPageEnterAnimation(next){
     }
     pendingLoadReveal = null;
     // A visible logo stays as it is; otherwise it draws in with the page.
-    console.log('[logo] startEnter', { navLogoWasShown });
     if (!navLogoWasShown) forceNavBarVisible();
     navAutoHideSuppressed = false;
   }, null, "startEnter");
@@ -1503,7 +1498,6 @@ barba.hooks.before(data => {
   navLogoWasShown = !navWasOpenForTransition && navBarIsVisible() && !!logoStyle &&
     logoStyle.visibility !== 'hidden' && parseFloat(logoStyle.opacity) > 0.5;
   navAutoHideSuppressed = true;
-  console.log('[logo] transition start', { shown: navLogoWasShown, barVisible: navBarIsVisible(), opacity: logoStyle && logoStyle.opacity, visibility: logoStyle && logoStyle.visibility, menuOpen: navWasOpenForTransition });
   // Safety net in case the enter step never runs.
   setTimeout(() => { navAutoHideSuppressed = false; }, 6000);
 
@@ -2505,14 +2499,14 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const origSplit = originalSplitByLink.get(link);
     const mainText = link.querySelector('.nav__link-text:not(.nav__link-text-alt)');
     if (altEl && origSplit && mainText && typeof SplitText !== "undefined") {
-      const cs = getComputedStyle(mainText);
+      // Takes the main text's own class, so its type size follows the same
+      // responsive CSS instead of a px value frozen at init (which went
+      // stale after a resize and left the alt text smaller).
       const altCopy = document.createElement('span');
+      altCopy.className = mainText.className;
       altCopy.setAttribute('aria-hidden', 'true');
       altCopy.textContent = altEl.textContent.trim();
-      altCopy.style.cssText =
-        'position:absolute;left:0;top:0;white-space:nowrap;pointer-events:none;' +
-        `font-family:${cs.fontFamily};font-size:${cs.fontSize};font-weight:${cs.fontWeight};` +
-        `letter-spacing:${cs.letterSpacing};line-height:${cs.lineHeight};text-transform:${cs.textTransform};`;
+      altCopy.style.cssText = 'position:absolute;left:0;top:0;white-space:nowrap;pointer-events:none;';
       if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
       link.appendChild(altCopy);
       const altSplit = new SplitText(altCopy, { type: 'lines', aria: 'none', mask: 'lines', reduceWhiteSpace: false });
@@ -2803,7 +2797,6 @@ function resetNavLogo() {
 let navLogoPlayStart = 0;
 function playNavLogo() {
   navLogoPlayStart = performance.now();
-  console.log('[logo] play', (new Error().stack || '').split('\n').slice(2, 5).join(' | '));
   const anim = getNavLogoLottie();
   if (!anim) return;
   anim.loop = false;
@@ -2861,7 +2854,6 @@ function initNavAutoHide() {
     return false;
   };
   forceNavBarVisible = () => {
-    console.log('[logo] forceNavBarVisible: bar fades in, Lottie replays');
     visible = true;
     navBar.style.pointerEvents = 'auto';
     gsap.to(navBar, { opacity: 1, duration: 0.4, ease: WH_EASE, overwrite: true });
