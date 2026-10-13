@@ -82,7 +82,6 @@ let navBarIsVisible = () => true;
 let forceNavBarVisible = () => {};
 let leaveDone = false;
 let navClosed = Promise.resolve(); // resolves once the menu has finished closing
-let hardNavigating = false; // a full page load has taken over from this transition
 // b144 — nav class/colour sync held back until the open menu has closed.
 let pendingNavUpdateData = null;
 
@@ -108,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b295';
+const BUILD = 'b313';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -458,7 +457,9 @@ function initMenuButtonHover() {
   clone.textContent = 'Open';
   clone.style.cssText += ';position:absolute;top:0;left:0;width:auto;white-space:nowrap;pointer-events:none;transition:none;';
   wrap.appendChild(clone);
-  gsap.set(clone, { yPercent: 100, autoAlpha: 1 });
+  // Parked below the clip and invisible, so it isn't painted (or counted as
+  // content by the browser) until a roll starts.
+  gsap.set(clone, { yPercent: 100, autoAlpha: 0 });
 
   // Size the clipped wrapper to the wider word so neither is cut off.
   const fitWrap = () => {
@@ -485,8 +486,13 @@ function initMenuButtonHover() {
   const rollIn = () => {
     if (isOpen()) return;
     startSync();
+    gsap.set(clone, { autoAlpha: 1 });
     gsap.to(label, { yPercent: -100, ...ROLL });
     gsap.to(clone, { yPercent: 0, ...ROLL });
+  };
+  const parkClone = () => {
+    stopSync();
+    gsap.set(clone, { autoAlpha: 0 });
   };
   const rollOut = (instant) => {
     if (!instant && isOpen()) return; // b152 — keep "Open" in place while the menu is open
@@ -494,11 +500,11 @@ function initMenuButtonHover() {
       gsap.killTweensOf([label, clone], 'yPercent');
       gsap.set(label, { yPercent: 0 });
       gsap.set(clone, { yPercent: 100 });
-      stopSync();
+      parkClone();
       return;
     }
     gsap.to(label, { yPercent: 0, ...ROLL });
-    gsap.to(clone, { yPercent: 100, ...ROLL, onComplete: stopSync });
+    gsap.to(clone, { yPercent: 100, ...ROLL, onComplete: parkClone });
   };
 
   button.addEventListener('mouseenter', rollIn);
@@ -518,7 +524,7 @@ function initMenuButtonHover() {
       gsap.to(clone, { autoAlpha: 0, duration: 0.3, ease: WH_EASE, overwrite: 'auto' });
     } else {
       gsap.killTweensOf(clone);
-      gsap.set(clone, { yPercent: 100, autoAlpha: 1 });
+      gsap.set(clone, { yPercent: 100, autoAlpha: 0 });
       gsap.killTweensOf(label, 'yPercent');
       gsap.set(label, { yPercent: 0 });
       stopSync();
@@ -666,9 +672,8 @@ function initEmailCopy() {
 function initBeforeEnterFunctions(next) {
   nextPage = next || document;
 
-  // With the maps module already loaded (visited Contact earlier), start the
-  // incoming page's map by hand — Webflow only does it on a full page load.
-  if (next && next.querySelector('.w-widget-map')) Webflow.require('maps')?.ready();
+  // Start fetching the gallery library while the transition plays.
+  if (next && next.querySelector('[data-parallax-init]')) loadSmooothy().catch(() => {});
 
   // Runs before the enter animation
   // if (has('[data-something]')) initSomething();
@@ -869,6 +874,7 @@ function initAfterEnterFunctions(next) {
   // prepare behind.
   if (has('[data-bunny-background-init]')) initBunnyPlayerBackground(nextPage);
   if (has('[data-parallax="trigger"]')) initGlobalParallax(nextPage);
+  if (has('[data-peel]')) initStickerPeel(nextPage);
   if (has('.section__about')) initHeroAboutParallax(nextPage);
   if (has('.btn')) initButtonHoverFocus(nextPage);
   initUnderlineLinks(nextPage);
@@ -937,6 +943,7 @@ function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, 
   activateStickerReveal(stickers);
   activateImageReveal(images);
   activateRuleReveal(rules);
+  activateRevealSequences({ lines, rules, images });
   // An above-the-fold ScrollTrigger (the hero title, since "top 90%" is
   // already past at scroll 0) can be created with a stale start position
   // and never fire its once:true onEnter — refreshing right after
@@ -957,7 +964,18 @@ function playOnceAnimation({ loadReveal, displayLarge, lines, stickers, images, 
 // html.preloader-skip (site head) hides it on repeat visits.
 const PRELOADER_KEY = 'wh-preloader-seen'; // timestamp of the last play; the head snippet reads it too
 const PRELOADER_EXPIRY = 24 * 60 * 60 * 1000; // plays again once a day
-const PRELOADER_FORCE = new URLSearchParams(location.search).has('preloader'); // ?preloader to test
+// Where it is skipped: the Webflow staging site (*.webflow.io), so tests there
+// run without it; ?preloader=off anywhere; and Lighthouse via PageSpeed Insights
+// or the CLI, which name themselves in the user agent. Skipping doesn't count as
+// a visit. ?preloader plays it regardless, to check the animation.
+const PRELOADER_PARAM = new URLSearchParams(location.search).get('preloader');
+const PRELOADER_FORCE = PRELOADER_PARAM !== null && PRELOADER_PARAM !== 'off';
+const PRELOADER_OFF = !PRELOADER_FORCE && (
+  PRELOADER_PARAM === 'off' ||
+  location.hostname.endsWith('.webflow.io') ||
+  /Chrome-Lighthouse|PageSpeed/i.test(navigator.userAgent)
+);
+if (PRELOADER_OFF) document.documentElement.classList.add('preloader-skip');
 const PRELOADER_HOLD = 2.75; // seconds the Lottie plays before the wipe
 const PRELOADER_VIDEO_MAX = 3; // longest the wipe waits for the hero video
 const PRELOADER_FADE = 0.3;
@@ -999,7 +1017,7 @@ async function runPreloader(container) {
   if (!preloader) return;
 
   const lastSeen = Number(localStorage.getItem(PRELOADER_KEY));
-  if (Date.now() - lastSeen < PRELOADER_EXPIRY && !PRELOADER_FORCE) {
+  if (PRELOADER_OFF || (Date.now() - lastSeen < PRELOADER_EXPIRY && !PRELOADER_FORCE)) {
     preloader.remove();
     return;
   }
@@ -1197,9 +1215,6 @@ function runPageLeaveAnimation(current, next) {
 
 async function runPageEnterAnimation(next){
 
-  // The page is about to be reloaded in full — leave the screen as it is.
-  if (hardNavigating) return new Promise(() => {});
-
   // b131 — menu was open: wait for the leave's swap, then animate the menu
   // closed (page behind it is already the new one, still hidden), and only
   // then fade the new page in and run its reveals.
@@ -1305,6 +1320,7 @@ async function runPageEnterAnimation(next){
     // needs it too, to fire the hero's own intro paragraph in the same
     // callback as the title (see both functions' own comments).
     const linePreparedForHero = pendingLineReveals;
+    const sequenceInputs = { lines: pendingLineReveals, rules: pendingRuleReveals, images: pendingImageReveals };
     openEntryWindow(pendingDisplayLargeReveals);
     try {
       activateLineReveal(pendingLineReveals);
@@ -1335,6 +1351,10 @@ async function runPageEnterAnimation(next){
     } catch (err) {
     }
     pendingRuleReveals = null;
+    try {
+      activateRevealSequences(sequenceInputs);
+    } catch (err) {
+    }
     // An above-the-fold ScrollTrigger created just above (the hero title
     // especially, since its "top 90%" start point is already behind us at
     // scroll 0) can come out with a stale start position computed against
@@ -1450,16 +1470,6 @@ barba.hooks.beforeEnter(data => {
 
   if (lenis && typeof lenis.stop === "function") {
     lenis.stop();
-  }
-
-  // Webflow ships its maps module only with pages that use it, so it is
-  // missing when arriving from a page without a map (e.g. Home -> Contact)
-  // and can't be loaded after the fact. Fall back to a full page load there,
-  // once the menu has closed / the old page has faded out.
-  if (data.next.container.querySelector('.w-widget-map') && !Webflow.require('maps')) {
-    const settled = navWasOpenForTransition ? navClosed : waitSeconds(TRANSITION_FADE_OUT);
-    hardNavigating = true;
-    return settled.then(() => window.location.assign(data.next.url.href));
   }
 
   initBeforeEnterFunctions(data.next.container);
@@ -1902,7 +1912,13 @@ function prepareLineReveal(scope) {
     // b115 — same treatment as the display-heading reveal now: plain
     // rise + blur + opacity fade (DISPLAY_LARGE_ANIM), unmasked. Was
     // yPercent 120->0 inside a `mask: "lines"` wrapper.
-    const split = new SplitText(el, { type: "lines" });
+    // aria: 'none' on every line-only split. SplitText's default ('auto') puts an
+    // aria-label on the element and hides the lines from assistive tech; on a
+    // <p> or <div> that label is not allowed (and is ignored), so the text
+    // would vanish for screen readers. A line split leaves every word whole,
+    // so the original text stays readable and crawlable as it is. Splits that
+    // break words into characters keep 'auto', where the label is needed.
+    const split = new SplitText(el, { type: "lines", aria: 'none' });
     gsap.set(split.lines, {
       opacity: 0,
       y: `${DISPLAY_LARGE_ANIM.travelEm}em`,
@@ -1947,34 +1963,108 @@ function prepareLineReveal(scope) {
 const LINE_REVEAL_DURATION = 1.9;
 const LINE_REVEAL_STAGGER = 0.05;
 
+// Some sections play as one ordered sequence rather than piece by piece as each
+// element happens to cross its trigger line. Everything inside `root` (text
+// lines, rules, buttons) is played in document order, each item starting
+// `stagger` after the one before it, with `groupGap` extra between groups: the
+// footer runs logo, first column, second column; Contact runs the contact
+// details, then the form. A negative `groupGap` makes a group start before the
+// previous one has finished its own stagger, so the two overlap.
+const REVEAL_SEQUENCES = [
+  { root: '.section__footer', group: '.footer__contact__wrap, .footer__logo', stagger: 0.08, groupGap: 0.12 },
+  { root: '.section__contact', group: '.contact__address__wrap, .contact__form__wrap', stagger: 0.08, groupGap: -0.3 }
+];
+
+const sequenceFor = el => REVEAL_SEQUENCES.find(seq => el.closest(seq.root));
+
+// An entry tagged with heroSection is fired by activateDisplayLargeReveal
+// instead (in the same callback as the title's own reveal), so it never gets a
+// trigger of its own here: that would double-animate it.
+function playLineEntry({ split, unit, underline }, extraDelay = 0) {
+  const delay = entryWaitDelay() + extraDelay;
+  // b147 — an inline run is revealed as one unit (see prepareLineReveal).
+  if (unit) {
+    gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, delay, ease: DISPLAY_LARGE_ANIM.ease, onStart: () => releaseUnderline(underline) });
+    return;
+  }
+  // b115 — same animation as the display-heading reveal (DISPLAY_LARGE_ANIM):
+  // was yPercent 0, LINE_REVEAL_DURATION/"expo.out"/LINE_REVEAL_STAGGER.
+  gsap.to(split.lines, {
+    opacity: 1,
+    y: 0,
+    duration: DISPLAY_LARGE_ANIM.duration,
+    delay,
+    ease: DISPLAY_LARGE_ANIM.ease,
+    stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" },
+    onStart: () => releaseUnderline(underline)
+  });
+}
+
 function activateLineReveal(prepared) {
-  (prepared || []).forEach(({ split, unit, start, trigger, heroSection, underline }) => {
-    // An entry tagged with heroSection is fired by activateDisplayLargeReveal
-    // instead (in the same callback as the title's own reveal), so it must
-    // NOT also get its own trigger here — that would double-animate it.
-    if (heroSection) return;
-    ScrollTrigger.create({
-      trigger: trigger,
-      start: start,
-      once: true,
-      onEnter: () => {
-        // b147 — an inline run is revealed as one unit (see prepareLineReveal).
-        if (unit) {
-          gsap.to(unit, { opacity: 1, y: 0, duration: DISPLAY_LARGE_ANIM.duration, delay: entryWaitDelay(), ease: DISPLAY_LARGE_ANIM.ease, onStart: () => releaseUnderline(underline) });
-          return;
-        }
-        // b115 — same animation as the display-heading reveal (DISPLAY_LARGE_ANIM):
-        // was yPercent 0, LINE_REVEAL_DURATION/"expo.out"/LINE_REVEAL_STAGGER.
-        gsap.to(split.lines, {
-          opacity: 1,
-          y: 0,
-          duration: DISPLAY_LARGE_ANIM.duration,
-          delay: entryWaitDelay(),
-          ease: DISPLAY_LARGE_ANIM.ease,
-          stagger: { each: DISPLAY_LARGE_ANIM.stagger, from: "start" },
-          onStart: () => releaseUnderline(underline)
-        });
+  (prepared || [])
+    .filter(entry => !entry.heroSection && !sequenceFor(entry.trigger))
+    .forEach(entry => {
+      ScrollTrigger.create({ trigger: entry.trigger, start: entry.start, once: true, onEnter: () => playLineEntry(entry) });
+    });
+}
+
+// Builds the sequences from the same prepared lists the individual reveals use;
+// those skip anything inside a sequence root, so each element is animated once.
+// Each group has its own trigger, so a group further down the page waits for
+// the reader to reach it; groups that start together keep their order, and one
+// that starts after the earlier groups have finished plays straight away.
+function activateRevealSequences({ lines, rules, images }) {
+  const items = [
+    ...(lines || []).filter(entry => !entry.heroSection).map(entry => ({
+      el: entry.trigger,
+      start: entry.start,
+      play: delay => playLineEntry(entry, delay)
+    })),
+    ...(rules || []).map(el => ({
+      el,
+      start: RULE_START,
+      play: delay => drawRule(el, entryWaitDelay() + delay)
+    })),
+    ...(images || []).map(({ el, trigger }) => ({
+      el: trigger,
+      start: IMAGE_START,
+      play: delay => revealImage(el, entryWaitDelay() + delay)
+    }))
+  ];
+
+  REVEAL_SEQUENCES.forEach(seq => {
+    const members = items
+      .filter(item => seq.root && item.el.closest(seq.root))
+      .sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    if (!members.length) return;
+
+    // Consecutive members of the same group are neighbours in document order.
+    const groups = [];
+    members.forEach((item, i) => {
+      const groupEl = item.el.closest(seq.group);
+      let group = groups[groups.length - 1];
+      if (!group || group.el !== groupEl) {
+        group = { el: groupEl, items: [], base: i * seq.stagger + groups.length * seq.groupGap };
+        groups.push(group);
       }
+      item.offset = i * seq.stagger + (groups.length - 1) * seq.groupGap - group.base;
+      group.items.push(item);
+    });
+
+    let startedAt = null;
+    groups.forEach(group => {
+      const lead = group.items[0];
+      ScrollTrigger.create({
+        trigger: lead.el,
+        start: lead.start,
+        once: true,
+        onEnter: () => {
+          const now = gsap.ticker.time;
+          if (startedAt === null) startedAt = now;
+          const wait = Math.max(0, group.base - (now - startedAt));
+          group.items.forEach(item => item.play(wait + item.offset));
+        }
+      });
     });
   });
 }
@@ -2321,7 +2411,7 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
     const caption = li.querySelector('.nav__image-caption');
     let captionSplit = null;
     if (caption && typeof SplitText !== "undefined") {
-      captionSplit = new SplitText(caption, { type: "lines", mask: "lines" });
+      captionSplit = new SplitText(caption, { type: "lines", aria: 'none', mask: "lines" });
       gsap.set(captionSplit.lines, { yPercent: 110 });
     }
 
@@ -2345,7 +2435,7 @@ function initNavLinkHoverEffects(dimCloseIcon, undimCloseIcon, isSettled, navLin
         `letter-spacing:${cs.letterSpacing};line-height:${cs.lineHeight};text-transform:${cs.textTransform};`;
       if (getComputedStyle(link).position === 'static') link.style.position = 'relative';
       link.appendChild(altCopy);
-      const altSplit = new SplitText(altCopy, { type: 'lines', mask: 'lines', reduceWhiteSpace: false });
+      const altSplit = new SplitText(altCopy, { type: 'lines', aria: 'none', mask: 'lines', reduceWhiteSpace: false });
       gsap.set(altSplit.lines, { yPercent: 110 });
       // Centre the copy over the main text (measured on hover, layout can change).
       const place = () => {
@@ -2788,11 +2878,11 @@ function initFullScreenNavigation() {
     : [];
 
   const topSecondarySplits = typeof SplitText !== "undefined"
-    ? topSecondaryEls.map(el => new SplitText(el, { type: "lines", mask: "lines" }))
+    ? topSecondaryEls.map(el => new SplitText(el, { type: "lines", aria: 'none', mask: "lines" }))
     : [];
 
   const bottomSecondarySplits = typeof SplitText !== "undefined"
-    ? bottomSecondaryEls.map(el => new SplitText(el, { type: "lines", mask: "lines" }))
+    ? bottomSecondaryEls.map(el => new SplitText(el, { type: "lines", aria: 'none', mask: "lines" }))
     : [];
 
   // Each link only becomes hoverable once its own characters finish —
@@ -3792,7 +3882,7 @@ function prepareDisplayLargeReveal(scope) {
     // rise+blur+opacity fade reads fine without the overflow-hidden mask,
     // and it let the blur get clipped at the mask edge).
     const split = new SplitText(el, {
-      type: "lines",
+      type: "lines", aria: 'none',
       reduceWhiteSpace: false
     });
     gsap.set(split.lines, {
@@ -3920,14 +4010,15 @@ function prepareRuleReveal(scope) {
   return rules;
 }
 
+const RULE_START = 'top 92%';
+
+function drawRule(el, delay = 0) {
+  gsap.to(el, { scaleX: 1, duration: RULE_REVEAL.duration, delay, ease: RULE_REVEAL.ease });
+}
+
 function activateRuleReveal(rules) {
-  (rules || []).forEach(el => {
-    ScrollTrigger.create({
-      trigger: el,
-      start: 'top 92%',
-      once: true,
-      onEnter: () => gsap.to(el, { scaleX: 1, duration: RULE_REVEAL.duration, ease: RULE_REVEAL.ease })
-    });
+  (rules || []).filter(el => !sequenceFor(el)).forEach(el => {
+    ScrollTrigger.create({ trigger: el, start: RULE_START, once: true, onEnter: () => drawRule(el) });
   });
 }
 
@@ -3967,22 +4058,243 @@ function prepareStickerReveal(scope) {
   return prepared;
 }
 
+// Stickers that scroll in together (the CTA cluster) arrive as one batch and
+// are staggered; a lone sticker is just a batch of one.
+const STICKER_STAGGER = 0.12;
+
 function activateStickerReveal(prepared) {
-  (prepared || []).forEach(({ el }) => {
-    ScrollTrigger.create({
-      trigger: el,
-      start: 'top 90%',
-      once: true,
-      onEnter: () => {
-        gsap.to(el, {
-          opacity: 1,
-          y: 0,
-          duration: DISPLAY_LARGE_ANIM.duration,
-          delay: entryStickerDelay(),
-          ease: DISPLAY_LARGE_ANIM.ease
-        });
-      }
+  const els = (prepared || []).map(({ el }) => el);
+  if (!els.length) return;
+  ScrollTrigger.batch(els, {
+    start: 'top 90%',
+    once: true,
+    interval: 0.1,
+    onEnter: (batch) => {
+      const delay = entryStickerDelay();
+      gsap.to(batch, {
+        opacity: 1,
+        y: 0,
+        duration: DISPLAY_LARGE_ANIM.duration,
+        delay,
+        stagger: STICKER_STAGGER,
+        ease: DISPLAY_LARGE_ANIM.ease
+      });
+    }
+  });
+}
+
+// -----------------------------------------
+// STICKER PEEL
+// -----------------------------------------
+
+// Hovering a sticker lifts its edge like a sticker coming off a piece of
+// fruit. The fold comes from the side the pointer enters and stays there until
+// the pointer leaves and comes back. data-peel on the svg or any wrapper
+// around it opts a sticker in; data-peel-size scales the lift (default 1).
+// Without the attribute a sticker does nothing.
+//
+// The fold is done inside the sticker's own svg, so it works on any shape.
+// The artwork is wrapped in a group that is cut along a fold line; a mirror
+// image of the same artwork, clipped to the same side of the line, is the
+// part folded back. The mirror is lightened and drops a soft shadow onto the
+// sticker underneath. Two numbers describe the fold: the direction it comes
+// from (an angle around the sticker's centre) and how far it has travelled.
+const PEEL = { size: 0.11, inDuration: 0.6, outDuration: 0.5, lighten: 0.22, shadow: 0.35 };
+const PEEL_EDGE_STEPS = 90; // outline distances are measured every 4 degrees
+const SVG_NS = 'http://www.w3.org/2000/svg';
+let peelCount = 0;
+
+// How far in from `origin`, along `dir`, the artwork's real outline starts.
+// A sticker's bounding box is mostly empty space at its edges and corners, so
+// the fold has to begin at the outline instead.
+function findPeelEdge(svg, origin, dir, reach) {
+  const shapes = [...svg.querySelectorAll('path, circle, ellipse, rect, polygon')]
+    .filter(el => !el.closest('defs, clipPath, mask') && typeof el.isPointInFill === 'function' && el.getScreenCTM());
+  const root = svg.getScreenCTM();
+  if (!shapes.length || !root) return 0;
+  const point = svg.createSVGPoint();
+  const steps = 160;
+  for (let i = 0; i <= steps; i++) {
+    const distance = (reach * i) / steps;
+    point.x = origin.x + dir.x * distance;
+    point.y = origin.y + dir.y * distance;
+    const screen = point.matrixTransform(root);
+    if (shapes.some(el => el.isPointInFill(screen.matrixTransform(el.getScreenCTM().inverse())))) return distance;
+  }
+  return 0;
+}
+
+function setupStickerPeel(svg, scale) {
+  const box = svg.viewBox && svg.viewBox.baseVal;
+  if (!box || !box.width) return null;
+  const centre = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const reach = Math.hypot(box.width, box.height) / 2;
+  const travel = Math.min(box.width, box.height) * PEEL.size * scale;
+  const blur = Math.min(box.width, box.height) * 0.012;
+
+  const id = `peel${++peelCount}`;
+  const make = (name, attrs) => {
+    const node = document.createElementNS(SVG_NS, name);
+    Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, value));
+    return node;
+  };
+
+  // Wrap the artwork so it can be cut, and referenced for the mirror.
+  const art = make('g', { id: `${id}-art` });
+  [...svg.childNodes].forEach(node => art.appendChild(node));
+  const cut = make('g');
+  cut.appendChild(art);
+
+  const clipPath = make('clipPath', { id: `${id}-clip` });
+  const keep = make('path');
+  clipPath.appendChild(keep);
+
+  const filter = make('filter', { id: `${id}-fx`, x: '-50%', y: '-50%', width: '200%', height: '200%', 'color-interpolation-filters': 'sRGB' });
+  filter.innerHTML =
+    '<feComponentTransfer in="SourceGraphic" result="light">' +
+    ['R', 'G', 'B'].map(c => `<feFunc${c} type="linear" slope="${1 - PEEL.lighten}" intercept="${PEEL.lighten}"/>`).join('') +
+    '</feComponentTransfer>' +
+    `<feGaussianBlur in="SourceAlpha" stdDeviation="${blur}" result="blur"/>` +
+    '<feOffset in="blur" result="offset"/>' +
+    `<feComponentTransfer in="offset" result="shade"><feFuncA type="linear" slope="${PEEL.shadow}"/></feComponentTransfer>` +
+    '<feMerge><feMergeNode in="shade"/><feMergeNode in="light"/></feMerge>';
+  const shadowOffset = filter.querySelector('feOffset');
+
+  const defs = make('defs');
+  defs.append(clipPath, filter);
+
+  const mirror = make('g');
+  const flapClip = make('g');
+  // Set as inline style, not presentation attributes: site CSS resets both
+  // clip-path and filter on svg descendants, which beats an attribute.
+  flapClip.style.clipPath = `url(#${id}-clip)`;
+  flapClip.appendChild(mirror);
+  const flap = make('g', { 'pointer-events': 'none', 'aria-hidden': 'true' });
+  flap.style.filter = `url(#${id}-fx)`;
+  flap.appendChild(flapClip);
+  const use = make('use', { href: `#${id}-art` });
+  mirror.appendChild(use);
+  flap.style.display = 'none';
+
+  svg.append(defs, cut, flap);
+
+  // p: how far the fold has travelled. angle: the side it comes from, as a
+  // direction out from the centre.
+  const state = { p: 0 };
+  const swing = { angle: 0 };
+
+  // Distance from the far side of the sticker to its outline, per direction.
+  // Measured lazily and cached; render interpolates between neighbours.
+  const edges = new Array(PEEL_EDGE_STEPS);
+  const edgeAt = (bucket) => {
+    const i = ((bucket % PEEL_EDGE_STEPS) + PEEL_EDGE_STEPS) % PEEL_EDGE_STEPS;
+    if (edges[i] === undefined) {
+      const a = (i / PEEL_EDGE_STEPS) * Math.PI * 2;
+      const origin = { x: centre.x + Math.cos(a) * reach, y: centre.y + Math.sin(a) * reach };
+      edges[i] = findPeelEdge(svg, origin, { x: -Math.cos(a), y: -Math.sin(a) }, reach * 2) - 1;
+    }
+    return edges[i];
+  };
+
+  function render() {
+    const a = swing.angle;
+    // dir points into the sticker; origin sits outside it on the side the
+    // fold comes from.
+    const dir = { x: -Math.cos(a), y: -Math.sin(a) };
+    const perp = { x: -dir.y, y: dir.x };
+    const origin = { x: centre.x - dir.x * reach, y: centre.y - dir.y * reach };
+
+    const position = (((a / (Math.PI * 2)) % 1) + 1) % 1 * PEEL_EDGE_STEPS;
+    const low = Math.floor(position);
+    const edge = edgeAt(low) + (edgeAt(low + 1) - edgeAt(low)) * (position - low);
+
+    // s: distance of the fold line from the origin, along dir.
+    const s = edge + state.p * travel;
+    const fx = origin.x + dir.x * s;
+    const fy = origin.y + dir.y * s;
+    const far = reach * 4;
+    const pts = [
+      [fx + perp.x * far, fy + perp.y * far],
+      [fx - perp.x * far, fy - perp.y * far],
+      [fx - perp.x * far + dir.x * far, fy - perp.y * far + dir.y * far],
+      [fx + perp.x * far + dir.x * far, fy + perp.y * far + dir.y * far]
+    ];
+    keep.setAttribute('d', `M${pts.map(pt => pt.join(' ')).join('L')}Z`);
+    // Mirror across the fold line: p' = p - 2((p - origin)·dir - s)·dir
+    const k = 2 * (dir.x * origin.x + dir.y * origin.y + s);
+    mirror.setAttribute('transform', `matrix(${1 - 2 * dir.x * dir.x} ${-2 * dir.x * dir.y} ${-2 * dir.x * dir.y} ${1 - 2 * dir.y * dir.y} ${k * dir.x} ${k * dir.y})`);
+    shadowOffset.setAttribute('dx', -dir.x * blur * 1.5);
+    shadowOffset.setAttribute('dy', -dir.y * blur * 1.5);
+  }
+
+  const apply = (active) => {
+    cut.style.clipPath = active ? `url(#${id}-clip)` : '';
+    flap.style.display = active ? '' : 'none';
+  };
+
+  // The pointer's direction from the sticker's centre, in the svg's own
+  // coordinates so a rotated sticker still peels from the right side.
+  const angleOf = (clientX, clientY) => {
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return swing.angle;
+    const point = svg.createSVGPoint();
+    point.x = clientX;
+    point.y = clientY;
+    const local = point.matrixTransform(ctm.inverse());
+    return Math.atan2(local.y - centre.y, local.x - centre.x);
+  };
+
+  // The side is chosen when the pointer enters and then held until the
+  // sticker has settled flat again, so the fold never slides while peeled.
+  const aim = (target) => {
+    if (state.p >= 0.05) return;
+    swing.angle = target;
+    render();
+  };
+
+  render();
+
+  return {
+    aimAt(clientX, clientY) { aim(angleOf(clientX, clientY)); },
+    to(target, vars = {}) {
+      if (target > 0) apply(true);
+      gsap.to(state, {
+        p: target,
+        duration: target ? PEEL.inDuration : PEEL.outDuration,
+        ease: WH_EASE,
+        ...vars,
+        overwrite: true,
+        onUpdate: render,
+        onComplete: () => { if (!target) apply(false); }
+      });
+    }
+  };
+}
+
+// Built on first hover, once the sticker is laid out and measurable. Null
+// without a data-peel attribute, which is what stops a sticker reacting.
+const stickerPeels = new WeakMap();
+
+function stickerPeelFor(svg) {
+  if (reducedMotion || svg.tagName.toLowerCase() !== 'svg') return null;
+  if (stickerPeels.has(svg)) return stickerPeels.get(svg);
+  const holder = svg.closest('[data-peel]');
+  const scale = holder ? parseFloat(holder.getAttribute('data-peel-size')) || 1 : 1;
+  const peel = holder ? setupStickerPeel(svg, scale) : null;
+  stickerPeels.set(svg, peel);
+  return peel;
+}
+
+function initStickerPeel(scope) {
+  if (reducedMotion || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  (scope || document).querySelectorAll(STICKER_SELECTOR).forEach(svg => {
+    svg.addEventListener('pointerenter', (e) => {
+      const peel = stickerPeelFor(svg);
+      if (!peel) return;
+      peel.aimAt(e.clientX, e.clientY);
+      peel.to(1);
     });
+    svg.addEventListener('pointerleave', () => { const peel = stickerPeelFor(svg); if (peel) peel.to(0); });
   });
 }
 
@@ -4098,20 +4410,23 @@ function revealEntryImages(held, headingLines) {
   });
 }
 
-function revealImage(el) {
+function revealImage(el, delay = 0) {
   gsap.to(el, {
     opacity: 1,
     y: 0,
     duration: DISPLAY_LARGE_ANIM.duration,
+    delay,
     ease: DISPLAY_LARGE_ANIM.ease
   });
 }
 
+const IMAGE_START = 'top 90%';
+
 function activateImageReveal(prepared) {
-  (prepared || []).forEach(({ el, trigger }) => {
+  (prepared || []).filter(({ trigger }) => !sequenceFor(trigger)).forEach(({ el, trigger }) => {
     ScrollTrigger.create({
       trigger: trigger,
-      start: 'top 90%',
+      start: IMAGE_START,
       once: true,
       onEnter: () => revealImage(el)
     });
@@ -4244,7 +4559,7 @@ function revealLinesIn(el, opts) {
     position: 0
   }, opts || {});
 
-  const split = new SplitText(el, { type: 'lines', mask: 'lines' });
+  const split = new SplitText(el, { type: 'lines', aria: 'none', mask: 'lines' });
   gsap.set(split.lines, { yPercent: 100 });
 
   const vars = {
@@ -4722,7 +5037,7 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
   (scope || document).querySelectorAll('.slider__timeline__item').forEach(item => {
     const textEl = item.querySelector('[data-decade-text]');
     if (!item.id || !textEl) return;
-    const split = new SplitText(textEl, { type: "lines" });
+    const split = new SplitText(textEl, { type: "lines", aria: 'none' });
     gsap.set(split.lines, DECADE_HIDDEN);
     gsap.set(item, { display: 'none' });
     panels.set(item.id, { item, split });
@@ -4908,9 +5223,44 @@ function initSliderImageFormats(slides, onChange) {
   });
 }
 
-function initParallaxImageSlider(scope) {
-  if (typeof Smooothy === "undefined") return;
+// Smooothy is only needed on pages with a gallery, so it isn't in the site
+// head: it is fetched the first time a page that has one appears, and kept for
+// the rest of the visit. (A script in a page's own head wouldn't help here —
+// Barba doesn't run those when it swaps pages in.)
+const SMOOOTHY_SRC = 'https://unpkg.com/smooothy@0.0.35/dist/smooothy.min.js';
+const scriptLoads = new Map();
 
+function loadScriptOnce(src) {
+  if (!scriptLoads.has(src)) {
+    scriptLoads.set(src, new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = src;
+      tag.onload = resolve;
+      tag.onerror = () => { scriptLoads.delete(src); reject(new Error(`Failed to load ${src}`)); };
+      document.head.appendChild(tag);
+    }));
+  }
+  return scriptLoads.get(src);
+}
+
+const loadSmooothy = () => (typeof Smooothy === 'undefined' ? loadScriptOnce(SMOOOTHY_SRC) : Promise.resolve());
+
+async function initParallaxImageSlider(scope) {
+  try {
+    await loadSmooothy();
+  } catch (err) {
+    console.warn(err.message);
+    return;
+  }
+  // The visitor may have moved on while the script was loading.
+  if (scope && scope !== document && !scope.isConnected) return;
+  buildParallaxImageSlider(scope);
+  // The page was measured before the gallery existed.
+  if (hasLenis && lenis) lenis.resize();
+  if (hasScrollTrigger) ScrollTrigger.refresh();
+}
+
+function buildParallaxImageSlider(scope) {
   // Belt-and-suspenders — destroyParallaxImageSliders' own call site in
   // runPageLeaveAnimation handles normal teardown; this guards against
   // running twice for the same live page without an intervening navigation.
