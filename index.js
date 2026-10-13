@@ -107,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b315';
+const BUILD = 'b316';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -866,7 +866,9 @@ function resetTurnstile() {
 // Webflow embed: <div data-mapbox-map data-mapbox-token data-mapbox-style>.
 // GL JS (~200 KB) is only fetched once the map is about to scroll into view,
 // so it costs nothing on any other page or on first paint.
-const MAPBOX_GL_VERSION = 'v3.8.0';
+// Must be at least as new as the Studio that last saved the style: styles
+// saved by a newer Studio use syntax older GL JS rejects.
+const MAPBOX_GL_VERSION = 'v3.19.1';
 let mapboxLoader = null;
 
 function loadMapboxGL() {
