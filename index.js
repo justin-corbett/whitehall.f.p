@@ -107,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b314';
+const BUILD = 'b315';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -858,6 +858,79 @@ function resetTurnstile() {
   });
 }
 
+// -----------------------------------------
+// MAPBOX MAP (Contact)
+// -----------------------------------------
+// The Contact page's map is a plain Mapbox GL JS map instead of Studio's
+// iframe, so the page's own CSS can style its controls. Markup lives in the
+// Webflow embed: <div data-mapbox-map data-mapbox-token data-mapbox-style>.
+// GL JS (~200 KB) is only fetched once the map is about to scroll into view,
+// so it costs nothing on any other page or on first paint.
+const MAPBOX_GL_VERSION = 'v3.8.0';
+let mapboxLoader = null;
+
+function loadMapboxGL() {
+  if (window.mapboxgl) return Promise.resolve(window.mapboxgl);
+  if (mapboxLoader) return mapboxLoader;
+
+  mapboxLoader = new Promise((resolve, reject) => {
+    const base = `https://api.mapbox.com/mapbox-gl-js/${MAPBOX_GL_VERSION}/mapbox-gl`;
+    const stylesheet = document.createElement('link');
+    stylesheet.rel = 'stylesheet';
+    stylesheet.href = `${base}.css`;
+
+    const script = document.createElement('script');
+    script.src = `${base}.js`;
+    script.async = true;
+    script.onload = () => resolve(window.mapboxgl);
+    script.onerror = () => {
+      mapboxLoader = null;
+      reject(new Error('Mapbox GL JS failed to load'));
+    };
+
+    document.head.append(stylesheet, script);
+  });
+  return mapboxLoader;
+}
+
+function initMapboxMap(scope) {
+  const el = scope.querySelector('[data-mapbox-map]');
+  if (!el) return;
+
+  const observer = new IntersectionObserver(([entry]) => {
+    if (!entry.isIntersecting) return;
+    observer.disconnect();
+
+    loadMapboxGL().then(mapboxgl => {
+      if (!el.isConnected) return; // navigated away while the script loaded
+
+      mapboxgl.accessToken = el.dataset.mapboxToken;
+      const map = new mapboxgl.Map({
+        container: el,
+        style: el.dataset.mapboxStyle,
+        attributionControl: false,
+        // Wheel needs Ctrl/Cmd and touch needs two fingers, so the map never
+        // traps the page's scroll (Lenis included).
+        cooperativeGestures: true
+      });
+      map.addControl(new mapboxgl.AttributionControl({ compact: true }));
+      map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
+      el._mapboxMap = map;
+    }).catch(error => console.warn('[map]', error));
+  }, { rootMargin: '300px 0px' });
+
+  observer.observe(el);
+  el._mapboxObserver = observer;
+}
+
+function destroyMapboxMaps(container) {
+  container.querySelectorAll('[data-mapbox-map]').forEach(el => {
+    if (el._mapboxObserver) el._mapboxObserver.disconnect();
+    if (el._mapboxMap) el._mapboxMap.remove();
+    el._mapboxObserver = el._mapboxMap = null;
+  });
+}
+
 function initAfterEnterFunctions(next) {
   nextPage = next || document;
 
@@ -873,6 +946,7 @@ function initAfterEnterFunctions(next) {
   // together for the true first load, which has no covered window to
   // prepare behind.
   if (has('[data-bunny-background-init]')) initBunnyPlayerBackground(nextPage);
+  if (has('[data-mapbox-map]')) initMapboxMap(nextPage);
   if (has('[data-parallax="trigger"]')) initGlobalParallax(nextPage);
   if (has('[data-peel]')) initStickerPeel(nextPage);
   if (has('.section__about')) initHeroAboutParallax(nextPage);
@@ -1504,6 +1578,7 @@ barba.hooks.afterLeave(data => {
   // tear down its HLS.js/IntersectionObserver instances explicitly.
   if (data && data.current && data.current.container) {
     destroyBunnyPlayers(data.current.container);
+    destroyMapboxMaps(data.current.container);
   }
 });
 
