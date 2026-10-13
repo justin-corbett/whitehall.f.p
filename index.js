@@ -107,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b316';
+const BUILD = 'b317';
 console.log('[build]', BUILD);
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
@@ -911,12 +911,15 @@ function initMapboxMap(scope) {
         container: el,
         style: el.dataset.mapboxStyle,
         attributionControl: false,
-        // Wheel needs Ctrl/Cmd and touch needs two fingers, so the map never
-        // traps the page's scroll (Lenis included).
-        cooperativeGestures: true
+        // Drag pans the map with a mouse. Touch screens keep the two-finger
+        // gesture so a swipe past the map still scrolls the page.
+        cooperativeGestures: window.matchMedia('(pointer: coarse)').matches
       });
+      // The wheel belongs to the page (Lenis); zooming is by the +/- buttons,
+      // double-click or pinch.
+      map.scrollZoom.disable();
       map.addControl(new mapboxgl.AttributionControl({ compact: true }));
-      map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
+      map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
       el._mapboxMap = map;
     }).catch(error => console.warn('[map]', error));
   }, { rootMargin: '300px 0px' });
