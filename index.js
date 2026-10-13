@@ -107,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b319';
+const BUILD = 'b320';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -386,10 +386,12 @@ function preloadHomeHeroVideo() {
     });
 }
 
-// Secondary to the landing page: wait for full load, then idle, then a beat.
+// Secondary to the landing page: wait for full load, then idle, then a long
+// beat, so the page being looked at has the connection to itself first.
+const HOME_VIDEO_PRELOAD_DELAY = 8000;
 function schedulePreloadHomeHeroVideo() {
   const start = () => {
-    const run = () => setTimeout(preloadHomeHeroVideo, 1500);
+    const run = () => setTimeout(preloadHomeHeroVideo, HOME_VIDEO_PRELOAD_DELAY);
     if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 4000 });
     else run();
   };
@@ -3563,12 +3565,20 @@ function initBunnyPlayerBackground(scope) {
         // load the whole clip, and keep the back buffer so the opening
         // segments aren't evicted (which makes a loop stall after a pass or
         // two, and means a return visit re-downloads them).
-        var hls = new Hls({
+        var hlsConfig = {
           maxBufferLength: BG_BUFFER_SECONDS,
           maxMaxBufferLength: BG_BUFFER_SECONDS,
           maxBufferSize: BG_BUFFER_BYTES,
           backBufferLength: Infinity
-        });
+        };
+        // A parked preload is only a head start for Home, so its segments
+        // queue behind everything the visible page is still fetching.
+        if (player.hasAttribute('data-bunny-preload')) {
+          hlsConfig.fetchSetup = function(context, initParams) {
+            return new Request(context.url, Object.assign({}, initParams, { priority: 'low' }));
+          };
+        }
+        var hls = new Hls(hlsConfig);
         hls.attachMedia(video);
         hls.on(Hls.Events.MEDIA_ATTACHED, function() { hls.loadSource(src); });
         hls.on(Hls.Events.MANIFEST_PARSED, function() {
