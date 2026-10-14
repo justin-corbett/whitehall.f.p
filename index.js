@@ -4,7 +4,12 @@
 
 gsap.registerPlugin(CustomEase, ScrollTrigger);
 
+// ScrollTrigger remembers the browser's own scrollRestoration setting ("auto")
+// and writes it back to the history entry when the page unloads, so every
+// reload after the first was restored by the browser regardless of the line
+// above. Telling it "manual" is what makes the setting stick across reloads.
 history.scrollRestoration = "manual";
+ScrollTrigger.clearScrollMemory("manual");
 
 let lenis = null;
 
@@ -118,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b336';
+const BUILD = 'b338';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -156,7 +161,7 @@ const COLORS = {
 // -----------------------------------------
 function addConsoleBrand() {
   console.log(
-    '%c ✦ Site by Daymark ✦ %c\nhttps://www.daymark.co.nz/\n',
+    '\n%c ✦ Site by Daymark ✦ %c\n\nhttps://www.daymark.co.nz/\n',
     'background: #000; color: #fff; padding: 5px 0;',
     ''
   );
