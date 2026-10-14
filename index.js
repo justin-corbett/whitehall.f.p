@@ -107,7 +107,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b320';
+const BUILD = 'b334';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -136,7 +136,8 @@ const COLORS = {
   forest: '#002e20',       // Forest
   spring: '#d3fa9a',       // Spring
   leaf: '#2e6f40',         // Leaf
-  deepLake: '#10293a'      // Deep Lake
+  deepLake: '#10293a',     // Deep Lake
+  gold: '#eaaf20'          // Brand – Primary/gold
 };
 
 // -----------------------------------------
@@ -952,6 +953,8 @@ function initAfterEnterFunctions(next) {
   if (has('[data-mapbox-map]')) initMapboxMap(nextPage);
   if (has('[data-parallax="trigger"]')) initGlobalParallax(nextPage);
   if (has('[data-peel]')) initStickerPeel(nextPage);
+  if (has(STICKER_SELECTOR)) initStickerDrag(nextPage);
+  if (has('[data-lottie-color]')) initLottieColor(nextPage);
   if (has('.section__about')) initHeroAboutParallax(nextPage);
   if (has('.btn')) initButtonHoverFocus(nextPage);
   initUnderlineLinks(nextPage);
@@ -1167,6 +1170,27 @@ function getContainerBg(el) {
   return c;
 }
 
+// The persistent nav logo and Menu label are tinted inline by the colour
+// zones and by a page's data-nav-default-color. When the next page wants a
+// different colour, start easing there as the transition begins rather than
+// snapping once the old page has faded (resetPersistentNavColor, below, sets
+// the same colour at the end, so nothing jumps). The destination colour is the
+// next page's own override, else the nav's stylesheet colour.
+function easeNavColorTo(next) {
+  const overrideKey = findColorZoneTarget(next)?.getAttribute('data-nav-default-color');
+  const override = overrideKey ? COLORS[overrideKey] : null;
+  [document.querySelector('.nav__logo'), document.querySelector('.nav__button-label')].filter(Boolean).forEach(el => {
+    let color = override;
+    if (!color) {
+      const inline = el.style.color;
+      el.style.color = '';
+      color = getComputedStyle(el).color;
+      el.style.color = inline;
+    }
+    gsap.to(el, { color, duration: TRANSITION_FADE_OUT, ease: WH_EASE, overwrite: 'auto' });
+  });
+}
+
 function runPageLeaveAnimation(current, next) {
   // navWasOpenForTransition is decided in barba.hooks.before (b144), which
   // always runs first, so every hook agrees on it.
@@ -1278,6 +1302,8 @@ function runPageLeaveAnimation(current, next) {
   tl.set(next, {
     autoAlpha: 0
   }, 0);
+
+  if (!navWasOpenForTransition) easeNavColorTo(next);
 
   if (navWasOpenForTransition) {
     tl.set(current, { opacity: 0 }, 0);
@@ -1623,10 +1649,26 @@ if (!document.querySelector('[data-barba="wrapper"]')) {
   document.body.setAttribute('data-barba', 'wrapper');
 }
 
+// The Webflow page that serves as the site's 404 (namespace "404").
+const NOT_FOUND_PATH = '/404';
+
 barba.init({
   debug: false,
   timeout: 7000,
   preventRunning: true,
+
+  // A link to a page that doesn't exist answers 404, which Barba treats as a
+  // failed request and answers with a hard reload, so the 404 page would
+  // appear with no transition. Send those clicks to the 404 page through
+  // Barba instead (it answers 200 at /404), so it enters like any other page.
+  requestError: (trigger, action, url, response) => {
+    const isNotFoundPage = new URL(url, location.href).pathname === NOT_FOUND_PATH;
+    if (action === 'click' && response?.status === 404 && !isNotFoundPage) {
+      barba.go(NOT_FOUND_PATH);
+      return false;
+    }
+    return true;
+  },
   transitions: [
     {
       name: "default",
@@ -2783,6 +2825,33 @@ function getLottieIn(el) {
   const lottie = Webflow.require('lottie')?.lottie;
   if (!lottie || !el) return null;
   return lottie.getRegisteredAnimations().find(anim => el.contains(anim.wrapper)) || null;
+}
+
+// Recolours a Lottie whose artwork is white. Exports like this one paint
+// their shapes through an SVG filter that forces every pixel to white
+// (an feColorMatrix that sets R, G and B to 1 and keeps the alpha), so CSS
+// fill/stroke rules have nothing to act on. Rewriting that matrix to the brand
+// colour recolours the whole animation. Opt in with data-lottie-color="<key in
+// COLORS>" on the Lottie element (e.g. "gold"). The SVG is built after the
+// file loads, and Webflow rebuilds it on re-init, so the element is watched and
+// retinted whenever its SVG changes.
+const LOTTIE_WHITE_MATRIX = '0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 1 0';
+
+function tintLottie(el, hex) {
+  const [r, g, b] = [1, 3, 5].map(i => (parseInt(hex.slice(i, i + 2), 16) / 255).toFixed(4));
+  const matrix = `0 0 0 0 ${r} 0 0 0 0 ${g} 0 0 0 0 ${b} 0 0 0 1 0`;
+  el.querySelectorAll('feColorMatrix').forEach(node => {
+    if (node.getAttribute('values')?.trim() === LOTTIE_WHITE_MATRIX) node.setAttribute('values', matrix);
+  });
+}
+
+function initLottieColor(scope) {
+  (scope || document).querySelectorAll('[data-lottie-color]').forEach(el => {
+    const hex = COLORS[el.getAttribute('data-lottie-color')];
+    if (!hex) return;
+    tintLottie(el, hex);
+    new MutationObserver(() => tintLottie(el, hex)).observe(el, { childList: true, subtree: true });
+  });
 }
 
 function getNavLogoLottie() {
@@ -4190,7 +4259,7 @@ function activateStickerReveal(prepared) {
 // part folded back. The mirror is lightened and drops a soft shadow onto the
 // sticker underneath. Two numbers describe the fold: the direction it comes
 // from (an angle around the sticker's centre) and how far it has travelled.
-const PEEL = { size: 0.11, inDuration: 0.6, outDuration: 0.5, lighten: 0.22, shadow: 0.35 };
+const PEEL = { size: 0.11, inDuration: 0.6, outDuration: 0.5, lighten: 0.22, shadow: 0.2 };
 const PEEL_EDGE_STEPS = 90; // outline distances are measured every 4 degrees
 const SVG_NS = 'http://www.w3.org/2000/svg';
 let peelCount = 0;
@@ -4386,6 +4455,167 @@ function initStickerPeel(scope) {
       peel.to(1);
     });
     svg.addEventListener('pointerleave', () => { const peel = stickerPeelFor(svg); if (peel) peel.to(0); });
+  });
+}
+
+// -----------------------------------------
+// STICKER DRAG
+// -----------------------------------------
+
+// Every sticker can be picked up and moved around on desktop. The gallery's
+// decade stickers are part of the slider and stay put. Position is kept as the
+// element's own x/y (the reveal animates the same properties and ends at 0,
+// so a sticker moved after its reveal simply stays where it was dropped).
+// Movement is measured on screen and converted into the sticker's local space,
+// so a sticker inside a rotated or scaled wrapper still follows the pointer.
+//
+// Picking one up lifts it: it scales up, tilts a random few degrees and drops
+// a shadow, then settles back with a small overshoot on release. Letting go
+// while moving throws it a short way, easing to a stop.
+const STICKER_DRAG_EXCLUDE = '.slider__stickers__wrap, .parallax-slider__item';
+const STICKER_DRAG_THRESHOLD = 4; // px before a press counts as a drag, so clicks still work
+const STICKER_GRAB = {
+  scale: 1.05,
+  tilt: 12, // degrees, random either way
+  shadow: 'drop-shadow(0px 6px 6px rgba(0,0,0,0.16))',
+  noShadow: 'drop-shadow(0px 0px 0px rgba(0,0,0,0))',
+  liftDuration: 0.3,
+  liftEase: 'power2.out',
+  settleDuration: 0.2,
+  settleEase: 'back.out(3)',
+};
+const STICKER_THROW = {
+  reach: 0.18, // seconds of release velocity carried forward
+  maxDistance: 220, // px
+  duration: 0.8,
+  ease: 'power3.out',
+  sampleWindow: 100, // ms of pointer history that counts as the release velocity
+};
+
+function screenToLocalMatrix(el) {
+  let m = new DOMMatrix();
+  for (let node = el.parentElement; node && node !== document.documentElement; node = node.parentElement) {
+    const t = getComputedStyle(node).transform;
+    if (t && t !== 'none') m = new DOMMatrix(t).multiply(m);
+  }
+  return m.inverse();
+}
+
+// Keeps a sticker inside the viewport's width so dragging or throwing one
+// never creates sideways scroll.
+function clampScreenDx(rect, dx) {
+  return gsap.utils.clamp(Math.min(0, -rect.left), Math.max(0, window.innerWidth - rect.right), dx);
+}
+
+function makeStickerDraggable(el) {
+  let drag = null;
+
+  el.style.cursor = 'grab';
+  el.style.touchAction = 'none';
+
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    gsap.killTweensOf(el); // catches a throw still gliding, and a reveal still in flight
+    drag = {
+      id: e.pointerId,
+      px: e.clientX,
+      py: e.clientY,
+      x: gsap.getProperty(el, 'x'),
+      y: gsap.getProperty(el, 'y'),
+      scale: gsap.getProperty(el, 'scale'),
+      rotation: gsap.getProperty(el, 'rotation'),
+      rect: el.getBoundingClientRect(),
+      inverse: screenToLocalMatrix(el),
+      samples: [],
+      moved: false,
+    };
+    el.setPointerCapture(e.pointerId);
+    if (!reducedMotion) {
+      gsap.to(el, {
+        scale: drag.scale * STICKER_GRAB.scale,
+        rotation: drag.rotation + gsap.utils.random(-STICKER_GRAB.tilt, STICKER_GRAB.tilt),
+        filter: STICKER_GRAB.shadow,
+        duration: STICKER_GRAB.liftDuration,
+        ease: STICKER_GRAB.liftEase,
+        overwrite: 'auto',
+      });
+    }
+  });
+
+  el.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.px;
+    const dy = e.clientY - drag.py;
+    if (!drag.moved) {
+      if (Math.hypot(dx, dy) < STICKER_DRAG_THRESHOLD) return;
+      drag.moved = true;
+      el.style.cursor = 'grabbing';
+    }
+    const local = drag.inverse.transformPoint(new DOMPoint(clampScreenDx(drag.rect, dx), dy, 0, 0));
+    gsap.set(el, { x: drag.x + local.x, y: drag.y + local.y });
+    const now = performance.now();
+    drag.samples.push({ t: now, x: e.clientX, y: e.clientY });
+    while (drag.samples.length && now - drag.samples[0].t > STICKER_THROW.sampleWindow) drag.samples.shift();
+  });
+
+  // Release velocity in px/s, from the pointer's last stretch of movement.
+  // A pointer that stopped before letting go carries nothing forward.
+  const releaseVelocity = (samples) => {
+    const last = samples[samples.length - 1];
+    const first = samples[0];
+    if (!last || last === first || performance.now() - last.t > STICKER_THROW.sampleWindow) return { vx: 0, vy: 0 };
+    const seconds = (last.t - first.t) / 1000;
+    return { vx: (last.x - first.x) / seconds, vy: (last.y - first.y) / seconds };
+  };
+
+  const release = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    el.style.cursor = 'grab';
+    const { moved, scale, rotation, inverse, rect, samples } = drag;
+    drag = null;
+
+    if (!reducedMotion) {
+      gsap.to(el, {
+        scale,
+        rotation,
+        filter: STICKER_GRAB.noShadow,
+        duration: STICKER_GRAB.settleDuration,
+        ease: STICKER_GRAB.settleEase,
+        overwrite: 'auto',
+        onComplete: () => gsap.set(el, { clearProps: 'filter' }),
+      });
+    }
+
+    if (moved) {
+      // A drop must not also follow a link the sticker sits inside.
+      el.addEventListener('click', (ev) => ev.preventDefault(), { once: true, capture: true });
+      if (!reducedMotion) {
+        const { vx, vy } = releaseVelocity(samples);
+        let dx = vx * STICKER_THROW.reach;
+        let dy = vy * STICKER_THROW.reach;
+        const distance = Math.hypot(dx, dy);
+        if (distance > STICKER_THROW.maxDistance) {
+          dx *= STICKER_THROW.maxDistance / distance;
+          dy *= STICKER_THROW.maxDistance / distance;
+        }
+        if (distance > 1) {
+          const local = inverse.transformPoint(new DOMPoint(clampScreenDx(el.getBoundingClientRect(), dx), dy, 0, 0));
+          gsap.to(el, { x: `+=${local.x}`, y: `+=${local.y}`, duration: STICKER_THROW.duration, ease: STICKER_THROW.ease });
+        }
+      }
+    }
+  };
+  el.addEventListener('pointerup', release);
+  el.addEventListener('pointercancel', release);
+  el.addEventListener('dragstart', (e) => e.preventDefault());
+}
+
+function initStickerDrag(scope) {
+  if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  (scope || document).querySelectorAll(STICKER_SELECTOR).forEach((el) => {
+    if (el.closest(STICKER_DRAG_EXCLUDE)) return;
+    makeStickerDraggable(el);
   });
 }
 
