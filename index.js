@@ -6,14 +6,26 @@ gsap.registerPlugin(CustomEase, ScrollTrigger);
 
 history.scrollRestoration = "manual";
 
-// Force scroll to top on load — guards against the browser restoring a
-// remembered scroll position, and against Lenis's own internal position.
-window.scrollTo(0, 0);
-window.addEventListener('load', () => {
+let lenis = null;
+
+// Every real page load starts at the top. history.scrollRestoration only
+// stops the browser restoring on its own; the restore can still land late on a
+// refresh (after the script has run and before the layout has settled), and
+// Lenis keeps its own position, so the reset runs at every stage of a first
+// load: immediately, on DOM ready, at 'load', on pageshow (bfcache / reload),
+// and around the preloader (see barba's once()).
+function resetScrollToTop() {
   window.scrollTo(0, 0);
-  if (lenis && typeof lenis.scrollTo === "function") {
+  if (lenis && typeof lenis.scrollTo === 'function') {
     lenis.scrollTo(0, { immediate: true, force: true });
   }
+}
+
+resetScrollToTop();
+document.addEventListener('DOMContentLoaded', resetScrollToTop);
+window.addEventListener('pageshow', resetScrollToTop);
+window.addEventListener('load', () => {
+  resetScrollToTop();
   // Extra refresh once every subresource (images, webfont) has actually
   // loaded. The reveal ScrollTriggers are created earlier, as soon as a
   // page's markup is in the DOM — before a late webfont swap or hero image
@@ -24,7 +36,6 @@ window.addEventListener('load', () => {
   if (typeof ScrollTrigger !== "undefined") ScrollTrigger.refresh();
 });
 
-let lenis = null;
 let nextPage = document;
 let onceFunctionsInitialized = false;
 let navTimeline = null;
@@ -107,7 +118,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b334';
+const BUILD = 'b335';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1677,6 +1688,7 @@ barba.init({
       // First load
       async once(data) {
         initOnceFunctions();
+        resetScrollToTop();
         // b127 — if this first page isn't Home, warm Home's hero video in the
         // background once the page has loaded (no-op on Home).
         schedulePreloadHomeHeroVideo();
@@ -1689,6 +1701,7 @@ barba.init({
         // The page is hidden by the site head until its intro state is set (no flash of final content).
         document.documentElement.classList.remove('wh-loading');
         await runPreloader(data.next.container);
+        resetScrollToTop();
         playOnceAnimation(intro);
       },
 
