@@ -118,7 +118,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b335';
+const BUILD = 'b336';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -156,9 +156,9 @@ const COLORS = {
 // -----------------------------------------
 function addConsoleBrand() {
   console.log(
-    '\n %c ✦ Site by Daymark ✦ ',
-    'background: #000; color: #fff; padding: 5px 0; margin-right: 5px;',
-    'https://www.daymark.co.nz/ \n\n'
+    '%c ✦ Site by Daymark ✦ %c\nhttps://www.daymark.co.nz/\n',
+    'background: #000; color: #fff; padding: 5px 0;',
+    ''
   );
 }
 addConsoleBrand();
