@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b338';
+const BUILD = 'b345';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -488,6 +488,8 @@ function initMenuButtonHover() {
   };
   fitWrap();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitWrap);
+  // The nav persists across pages, so this listener lives for the session.
+  window.addEventListener('resize', debounceOnWidthChange(fitWrap, 150));
 
   const syncColor = () => { clone.style.color = getComputedStyle(label).color; };
   let syncing = false;
@@ -622,6 +624,9 @@ function initFooterLogoScroll() {
 // opening a mail client, and its text reads "Copied to clipboard" for 3s.
 // Delegated on document (bound once) so it survives Barba swaps. Text is
 // swapped at the text-node level so any SplitText line wrappers stay intact.
+// Set by initEmailCopy; lets a line re-split put the message back (see splitLinesAuto).
+let reapplyEmailCopy = () => {};
+
 function initEmailCopy() {
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const MESSAGE = 'Copied to clipboard';
@@ -651,18 +656,12 @@ function initEmailCopy() {
     } catch (e) { return false; }
   };
 
-  document.addEventListener('click', async (e) => {
-    const a = e.target.closest && e.target.closest('[data-copy-email]');
-    if (!a) return;
-    const email = getEmail(a);
-    if (!email) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (a._copyTimer) return; // already showing the message
+  // Addresses currently showing the message, by email. A line re-split (a
+  // resize) rebuilds the link's text, so the message is kept per address and
+  // laid back over the fresh markup instead of living on the old text nodes.
+  const holds = new Map(); // email -> { restore, timer }
 
-    const ok = await copyText(email);
-    if (!ok) { window.location.href = 'mailto:' + email; return; }
-
+  const showMessage = (a, hold) => {
     const walker = document.createTreeWalker(a, NodeFilter.SHOW_TEXT);
     const nodes = [];
     while (walker.nextNode()) { if (walker.currentNode.nodeValue.trim()) nodes.push(walker.currentNode); }
@@ -677,13 +676,41 @@ function initEmailCopy() {
     // it at the old text's width after the swap. Sizing it in pixels from the
     // new layout (reading the width forces one) makes it follow the text.
     const bar = a.querySelector('[data-underline-bar]') || [...a.children].find(c => c.tagName === 'SPAN' && getComputedStyle(c).position === 'absolute');
-    const fitBar = () => { if (bar) bar.style.width = `${a.getBoundingClientRect().width}px`; };
-    fitBar();
-    a._copyTimer = setTimeout(() => {
+    if (bar) bar.style.width = `${a.getBoundingClientRect().width}px`;
+    hold.restore = () => {
       nodes.forEach((n, i) => { n.nodeValue = originals[i]; });
       if (lowercase) a.style.textTransform = '';
       if (bar) bar.style.width = '100%';
-      a._copyTimer = null;
+    };
+  };
+
+  reapplyEmailCopy = (el) => {
+    if (!holds.size) return;
+    const links = el.matches('[data-copy-email]') ? [el] : [...el.querySelectorAll('[data-copy-email]')];
+    links.forEach((a) => {
+      const email = getEmail(a);
+      if (email && holds.has(email)) showMessage(a, holds.get(email));
+    });
+  };
+
+  document.addEventListener('click', async (e) => {
+    const a = e.target.closest && e.target.closest('[data-copy-email]');
+    if (!a) return;
+    const email = getEmail(a);
+    if (!email) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (holds.has(email)) return; // already showing the message
+
+    const ok = await copyText(email);
+    if (!ok) { window.location.href = 'mailto:' + email; return; }
+
+    const hold = { restore: () => {}, timer: null };
+    holds.set(email, hold);
+    showMessage(a, hold);
+    hold.timer = setTimeout(() => {
+      hold.restore();
+      holds.delete(email);
     }, HOLD_MS);
   }, true);
 }
@@ -1369,10 +1396,10 @@ async function runPageEnterAnimation(next){
     }
     // b115 — matches prepareLineReveal's new resting state (opacity/y/filter),
     // not the old yPercent-only mask reset.
-    (pendingLineReveals || []).forEach(({ split, unit, underline }) => { gsap.set(split ? split.lines : unit, { opacity: 1, y: 0 }); releaseUnderline(underline); });
+    (pendingLineReveals || []).forEach(({ split, unit, underline }) => { if (split) split.revealed = true; gsap.set(split ? split.lines : unit, { opacity: 1, y: 0 }); releaseUnderline(underline); });
     pendingLineReveals = null;
     // b113 — lines, not words, now that DISPLAY_LARGE_ANIM splits by line.
-    (pendingDisplayLargeReveals || []).forEach(({ splits }) => splits.forEach(split => gsap.set(split.lines, { opacity: 1, y: 0 })));
+    (pendingDisplayLargeReveals || []).forEach(({ splits }) => splits.forEach(split => { split.revealed = true; gsap.set(split.lines, { opacity: 1, y: 0 }); }));
     pendingDisplayLargeReveals = null;
     // b120 — matches prepareStickerReveal's new resting state (opacity/y/filter,
     // not the old autoAlpha/y/scale bounce-pop).
@@ -2003,6 +2030,48 @@ function spaceInlineRuns(scope) {
   });
 }
 
+// Splits an element into lines that follow its width. SplitText's autoSplit
+// re-splits whenever the element's width changes (a window resize, a rotated
+// phone, a late webfont), so the line wrappers never go stale and break the
+// text in the wrong places. `hidden` is the resting state of lines that have
+// not been revealed yet; once a split's reveal has started (`split.revealed`),
+// freshly split lines are left visible. A re-split changes the page height, so
+// ScrollTrigger is refreshed once the dust settles.
+let splitRefreshCall = null;
+function refreshScrollTriggersSoon() {
+  if (splitRefreshCall) splitRefreshCall.kill();
+  splitRefreshCall = gsap.delayedCall(0.1, () => ScrollTrigger.refresh());
+}
+
+function splitLinesAuto(el, options, hidden) {
+  let ready = false; // the first onSplit is the initial split, not a re-split
+  const split = new SplitText(el, {
+    ...options,
+    autoSplit: true,
+    onSplit(self) {
+      if (!self.revealed) gsap.set(self.lines, hidden);
+      if (ready) {
+        restoreUnderlines(el);
+        reapplyEmailCopy(el);
+        refreshScrollTriggersSoon();
+      }
+    }
+  });
+  ready = true;
+  return split;
+}
+
+// A re-split rebuilds the text's markup, which can drop an underline's bar or
+// replace the link element (and the hover listeners on it). Put them back.
+function restoreUnderlines(el) {
+  const links = el.matches('[data-underline-link]') ? [el] : [...el.querySelectorAll('[data-underline-link]')];
+  links.forEach((link) => {
+    const state = link._ul;
+    if (!state) setupUnderline(link);
+    else if (!link.contains(state.main.el)) link.appendChild(state.main.el);
+  });
+}
+
 function prepareLineReveal(scope) {
   if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
   spaceInlineRuns(scope);
@@ -2054,8 +2123,7 @@ function prepareLineReveal(scope) {
     // would vanish for screen readers. A line split leaves every word whole,
     // so the original text stays readable and crawlable as it is. Splits that
     // break words into characters keep 'auto', where the label is needed.
-    const split = new SplitText(el, { type: "lines", aria: 'none' });
-    gsap.set(split.lines, {
+    const split = splitLinesAuto(el, { type: "lines", aria: 'none' }, {
       opacity: 0,
       y: `${DISPLAY_LARGE_ANIM.travelEm}em`,
     });
@@ -2125,6 +2193,7 @@ function playLineEntry({ split, unit, underline }, extraDelay = 0) {
   }
   // b115 — same animation as the display-heading reveal (DISPLAY_LARGE_ANIM):
   // was yPercent 0, LINE_REVEAL_DURATION/"expo.out"/LINE_REVEAL_STAGGER.
+  split.revealed = true;
   gsap.to(split.lines, {
     opacity: 1,
     y: 0,
@@ -4059,11 +4128,10 @@ function prepareDisplayLargeReveal(scope) {
     // b114 — no line mask: animates whole lines directly, unclipped (the
     // rise+blur+opacity fade reads fine without the overflow-hidden mask,
     // and it let the blur get clipped at the mask edge).
-    const split = new SplitText(el, {
+    const split = splitLinesAuto(el, {
       type: "lines", aria: 'none',
       reduceWhiteSpace: false
-    });
-    gsap.set(split.lines, {
+    }, {
       opacity: 0,
       y: `${DISPLAY_LARGE_ANIM.headingTravelEm}em`,
     });
@@ -4126,6 +4194,7 @@ function activateDisplayLargeReveal(prepared, linePrepared) {
       start: "top 85%",
       once: true,
       onEnter: () => {
+        splits.forEach(s => { s.revealed = true; });
         const allLines = splits.flatMap(s => s.lines);
         // b113 — plain rise + blur + opacity fade, per line (see DISPLAY_LARGE_ANIM).
         // b128 — fromTo with the rise re-measured NOW, instead of a plain .to()
@@ -4154,6 +4223,7 @@ function activateDisplayLargeReveal(prepared, linePrepared) {
         if (heroSection && linePrepared) {
           linePrepared.forEach(entry => {
             if (entry.heroSection !== heroSection) return;
+            entry.split.revealed = true;
             gsap.to(entry.split.lines, {
               opacity: 1,
               y: 0,
@@ -4503,10 +4573,10 @@ const STICKER_GRAB = {
   settleEase: 'back.out(3)',
 };
 const STICKER_THROW = {
-  reach: 0.18, // seconds of release velocity carried forward
-  maxDistance: 220, // px
-  duration: 0.8,
-  ease: 'power3.out',
+  maxSpeed: 2200, // px/s, release velocity cap
+  friction: 3.2, // per second; a throw travels roughly speed / friction px
+  bounce: 0.75, // speed kept after hitting a viewport edge
+  stopSpeed: 12, // px/s, below this the glide ends
   sampleWindow: 100, // ms of pointer history that counts as the release velocity
 };
 
@@ -4525,25 +4595,80 @@ function clampScreenDx(rect, dx) {
   return gsap.utils.clamp(Math.min(0, -rect.left), Math.max(0, window.innerWidth - rect.right), dx);
 }
 
+// Dropped stickers keep a pixel offset, which would leave them stranded or
+// off-screen after a resize, so each one eases back home on a width change.
+const stickerResets = new Set();
+window.addEventListener('resize', debounceOnWidthChange(() => stickerResets.forEach((reset) => reset()), 150));
+
 function makeStickerDraggable(el) {
   let drag = null;
+  let home = null; // resting position, captured before the first drag
+  let glide = null; // ticker callback while a thrown sticker is travelling
+
+  const stopGlide = () => {
+    if (!glide) return;
+    gsap.ticker.remove(glide);
+    glide = null;
+  };
+
+  // Carries a thrown sticker on with friction, bouncing it off the viewport
+  // edges. The step is limited by the sticker's live bounds every frame, so
+  // it can never leave the viewport, even if it started the throw partly
+  // outside it (a tilt, or the page scrolling mid-glide).
+  const startGlide = (vx, vy, inverse) => {
+    stopGlide();
+    glide = (time, deltaTime) => {
+      if (!el.isConnected) return stopGlide();
+      const dt = Math.min(deltaTime, 50) / 1000;
+      const rect = el.getBoundingClientRect();
+      const minX = -rect.left;
+      const maxX = window.innerWidth - rect.right;
+      const minY = -rect.top;
+      const maxY = window.innerHeight - rect.bottom;
+      let sx = vx * dt;
+      let sy = vy * dt;
+      if (sx < minX) { sx = minX; vx = Math.abs(vx) * STICKER_THROW.bounce; }
+      else if (sx > maxX) { sx = maxX; vx = -Math.abs(vx) * STICKER_THROW.bounce; }
+      if (sy < minY) { sy = minY; vy = Math.abs(vy) * STICKER_THROW.bounce; }
+      else if (sy > maxY) { sy = maxY; vy = -Math.abs(vy) * STICKER_THROW.bounce; }
+      const local = inverse.transformPoint(new DOMPoint(sx, sy, 0, 0));
+      gsap.set(el, { x: `+=${local.x}`, y: `+=${local.y}` });
+      const decay = Math.exp(-STICKER_THROW.friction * dt);
+      vx *= decay;
+      vy *= decay;
+      if (Math.hypot(vx, vy) < STICKER_THROW.stopSpeed) stopGlide();
+    };
+    gsap.ticker.add(glide);
+  };
+
+  const reset = () => {
+    if (!el.isConnected) {
+      stopGlide();
+      stickerResets.delete(reset);
+      return;
+    }
+    stopGlide();
+    if (home) gsap.to(el, { x: home.x, y: home.y, duration: 0.4, ease: 'power2.out', overwrite: 'auto' });
+  };
+  stickerResets.add(reset);
 
   el.style.cursor = 'grab';
   el.style.touchAction = 'none';
 
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    gsap.killTweensOf(el); // catches a throw still gliding, and a reveal still in flight
+    gsap.killTweensOf(el); // catches a reveal still in flight
+    stopGlide(); // catches a throw still gliding
+    home ??= { x: gsap.getProperty(el, 'x'), y: gsap.getProperty(el, 'y') };
     drag = {
       id: e.pointerId,
       px: e.clientX,
       py: e.clientY,
-      x: gsap.getProperty(el, 'x'),
-      y: gsap.getProperty(el, 'y'),
       scale: gsap.getProperty(el, 'scale'),
       rotation: gsap.getProperty(el, 'rotation'),
-      rect: el.getBoundingClientRect(),
       inverse: screenToLocalMatrix(el),
+      appliedX: 0, // screen px the sticker has actually followed the pointer
+      appliedY: 0,
       samples: [],
       moved: false,
     };
@@ -4569,8 +4694,15 @@ function makeStickerDraggable(el) {
       drag.moved = true;
       el.style.cursor = 'grabbing';
     }
-    const local = drag.inverse.transformPoint(new DOMPoint(clampScreenDx(drag.rect, dx), dy, 0, 0));
-    gsap.set(el, { x: drag.x + local.x, y: drag.y + local.y });
+    // Follows the pointer step by step, limited by the sticker's live bounds
+    // (which grow with the grab scale and tilt) so it never pokes past the
+    // viewport's sides.
+    const stepX = clampScreenDx(el.getBoundingClientRect(), dx - drag.appliedX);
+    const stepY = dy - drag.appliedY;
+    drag.appliedX += stepX;
+    drag.appliedY += stepY;
+    const local = drag.inverse.transformPoint(new DOMPoint(stepX, stepY, 0, 0));
+    gsap.set(el, { x: `+=${local.x}`, y: `+=${local.y}` });
     const now = performance.now();
     drag.samples.push({ t: now, x: e.clientX, y: e.clientY });
     while (drag.samples.length && now - drag.samples[0].t > STICKER_THROW.sampleWindow) drag.samples.shift();
@@ -4590,7 +4722,7 @@ function makeStickerDraggable(el) {
     if (!drag || e.pointerId !== drag.id) return;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
     el.style.cursor = 'grab';
-    const { moved, scale, rotation, inverse, rect, samples } = drag;
+    const { moved, scale, rotation, inverse, samples } = drag;
     drag = null;
 
     if (!reducedMotion) {
@@ -4601,7 +4733,17 @@ function makeStickerDraggable(el) {
         duration: STICKER_GRAB.settleDuration,
         ease: STICKER_GRAB.settleEase,
         overwrite: 'auto',
-        onComplete: () => gsap.set(el, { clearProps: 'filter' }),
+        onComplete: () => {
+          gsap.set(el, { clearProps: 'filter' });
+          // Settling the tilt can leave a corner a pixel or two past the edge.
+          if (glide) return;
+          const rect = el.getBoundingClientRect();
+          const dx = rect.left < 0 ? -rect.left : Math.min(0, window.innerWidth - rect.right);
+          if (dx) {
+            const local = inverse.transformPoint(new DOMPoint(dx, 0, 0, 0));
+            gsap.set(el, { x: `+=${local.x}`, y: `+=${local.y}` });
+          }
+        },
       });
     }
 
@@ -4609,18 +4751,13 @@ function makeStickerDraggable(el) {
       // A drop must not also follow a link the sticker sits inside.
       el.addEventListener('click', (ev) => ev.preventDefault(), { once: true, capture: true });
       if (!reducedMotion) {
-        const { vx, vy } = releaseVelocity(samples);
-        let dx = vx * STICKER_THROW.reach;
-        let dy = vy * STICKER_THROW.reach;
-        const distance = Math.hypot(dx, dy);
-        if (distance > STICKER_THROW.maxDistance) {
-          dx *= STICKER_THROW.maxDistance / distance;
-          dy *= STICKER_THROW.maxDistance / distance;
+        let { vx, vy } = releaseVelocity(samples);
+        const speed = Math.hypot(vx, vy);
+        if (speed > STICKER_THROW.maxSpeed) {
+          vx *= STICKER_THROW.maxSpeed / speed;
+          vy *= STICKER_THROW.maxSpeed / speed;
         }
-        if (distance > 1) {
-          const local = inverse.transformPoint(new DOMPoint(clampScreenDx(el.getBoundingClientRect(), dx), dy, 0, 0));
-          gsap.to(el, { x: `+=${local.x}`, y: `+=${local.y}`, duration: STICKER_THROW.duration, ease: STICKER_THROW.ease });
-        }
+        if (speed > STICKER_THROW.stopSpeed) startGlide(vx, vy, inverse);
       }
     }
   };
@@ -4807,7 +4944,8 @@ function initHeroAboutParallax(scope) {
         trigger: trigger,
         start: 'top bottom',
         end: 'top top',
-        scrub: true
+        scrub: true,
+        invalidateOnRefresh: true
       }
     });
 
@@ -5223,6 +5361,9 @@ const HOVER_TEXT = COLORS.kiwiSkin;
 // Roll-hover text, same mechanic as the nav links: original line rolls
 // up out of view while an identical clone rolls up into place from
 // below, masked by an overflow:hidden wrapper.
+const rollPairFits = new Set();
+window.addEventListener('resize', debounceOnWidthChange(() => rollPairFits.forEach((fit) => fit()), 150));
+
 function buildRollPairs(textNode) {
   if (typeof SplitText === "undefined" || !textNode) return null;
 
@@ -5249,14 +5390,25 @@ function buildRollPairs(textNode) {
   cloneEl.textContent = label;
   wrap.appendChild(cloneEl);
 
-  // Measure both in normal flow before pulling them out of it.
-  const width = Math.max(origEl.getBoundingClientRect().width, cloneEl.getBoundingClientRect().width);
-  const height = origEl.getBoundingClientRect().height;
-  wrap.style.width = width + 'px';
-  wrap.style.height = height + 'px';
+  origEl.style.cssText += 'top:0;left:0;';
+  cloneEl.style.cssText += 'top:0;left:0;';
 
-  origEl.style.cssText += 'position:absolute;top:0;left:0;';
-  cloneEl.style.cssText += 'position:absolute;top:0;left:0;';
+  // Sizes the wrapper to the label. Both words are measured in normal flow,
+  // then pulled out of it. Reruns on resize, since type size can change.
+  const fit = () => {
+    if (!wrap.isConnected) {
+      rollPairFits.delete(fit);
+      return;
+    }
+    wrap.style.width = '';
+    wrap.style.height = '';
+    origEl.style.position = cloneEl.style.position = '';
+    wrap.style.width = Math.max(origEl.getBoundingClientRect().width, cloneEl.getBoundingClientRect().width) + 'px';
+    wrap.style.height = origEl.getBoundingClientRect().height + 'px';
+    origEl.style.position = cloneEl.style.position = 'absolute';
+  };
+  fit();
+  rollPairFits.add(fit);
 
   // b126 — rolls as one whole line (orig up/out, clone up/in), no per-char
   // split or stagger. The clone starts pushed down 100%; enter/leave in
@@ -5379,7 +5531,7 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
     const split = new SplitText(textEl, { type: "lines", aria: 'none' });
     gsap.set(split.lines, DECADE_HIDDEN);
     gsap.set(item, { display: 'none' });
-    panels.set(item.id, { item, split });
+    panels.set(item.id, { item, textEl, split });
   });
   if (!panels.size) return null;
 
@@ -5401,14 +5553,33 @@ function initDecadeTimelinePanels(scope, decadeKeys) {
     list.style.minHeight = `${tallest}px`;
   };
   fitListHeight();
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitListHeight);
+
+  // Line breaks are baked into the split, so a width or font change needs a
+  // fresh split. The active panel is left showing; the rest stay hidden.
+  const resplit = () => {
+    if (!list.isConnected) return;
+    if (transitionTl) {
+      transitionTl.kill();
+      transitionTl = null;
+    }
+    panels.forEach((panel, id) => {
+      const active = id === activeId;
+      gsap.killTweensOf(panel.split.lines);
+      panel.split.revert();
+      panel.split = new SplitText(panel.textEl, { type: "lines", aria: 'none' });
+      gsap.set(panel.split.lines, active ? { opacity: 1, y: 0 } : DECADE_HIDDEN);
+      gsap.set(panel.item, { display: active ? '' : 'none' });
+    });
+    fitListHeight();
+  };
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(resplit);
   if (typeof ResizeObserver !== 'undefined') {
     let lastWidth = list.offsetWidth;
     const observer = new ResizeObserver(() => {
       if (!list.isConnected) return observer.disconnect();
       if (list.offsetWidth === lastWidth) return;
       lastWidth = list.offsetWidth;
-      fitListHeight();
+      resplit();
     });
     observer.observe(list);
   }
