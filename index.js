@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b352';
+const BUILD = 'b353';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -2256,19 +2256,23 @@ const REVEAL_SEQUENCES = [
 const sequenceFor = el => REVEAL_SEQUENCES.find(seq => el.closest(seq.root));
 
 // A reveal whose start lies past the end of the page never fires. That is what
-// happens to text near the bottom (the footer), most of all on phones, where
-// the browser bar and in-app toolbars change the viewport height. The start is
-// held back to the page's last scroll position, so the reveal always plays.
-// Only "top N%" starts are rewritten; anything else is passed through.
+// happens to text near the bottom (the footer), most of all on phones: Safari,
+// Instagram and Meta change the viewport height as their toolbars slide away,
+// while ScrollTrigger keeps the page length it measured at the start, so the
+// last scroll position it expects can never actually be reached. The start is
+// held back from the end of the page by a margin that covers the toolbars, so
+// the reveal always plays. Only "top N%" starts are rewritten; anything else is
+// passed through.
 function revealStart(el, start) {
   const match = /^top\s+(\d+(?:\.\d+)?)%$/.exec(start);
   if (!match) return start;
   const fraction = parseFloat(match[1]) / 100;
   return () => {
     const top = el.getBoundingClientRect().top + window.scrollY;
+    const margin = Math.max(160, window.innerHeight * 0.2);
     // Not floored at 0: text already in view at the top of the page has a
     // negative start, which is what makes its reveal fire straight away.
-    return Math.min(top - fraction * window.innerHeight, ScrollTrigger.maxScroll(window) - 2);
+    return Math.min(top - fraction * window.innerHeight, ScrollTrigger.maxScroll(window) - margin);
   };
 }
 
