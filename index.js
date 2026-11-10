@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b354';
+const BUILD = 'b355';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -935,11 +935,12 @@ function resetTurnstile() {
 // iframe, so the page's own CSS can style its controls. Markup lives in the
 // Webflow embed: <div data-mapbox-map data-mapbox-token data-mapbox-style>.
 // GL JS is 1.6 MB once unpacked, and a phone needs a few hundred milliseconds
-// of solid main-thread time to compile it. Compiled while the visitor is
-// scrolling toward the map, that shows up as the page freezing. So the library
-// is fetched and compiled in an idle moment shortly after the Contact page
-// shows, and the map itself is built a screen or two before it scrolls into
-// view. Other pages never load it, so it costs nothing on first paint.
+// of solid main-thread time to compile it, and more again to build the map.
+// Done while the visitor is scrolling toward the map, that shows up as the page
+// stuttering. So both happen as soon as the Contact page shows: the library is
+// fetched straight away and the map is built at the next idle moment, long
+// before it scrolls into view. Other pages never load it, so it costs nothing
+// on first paint.
 // Must be at least as new as the Studio that last saved the style: styles
 // saved by a newer Studio use syntax older GL JS rejects.
 const MAPBOX_GL_VERSION = 'v3.19.1';
@@ -979,42 +980,31 @@ function initMapboxMap(scope) {
   const el = scope.querySelector('[data-mapbox-map]');
   if (!el) return;
 
-  whenIdle(() => loadMapboxGL().catch(error => console.warn('[map]', error)), 4000);
+  loadMapboxGL().then(mapboxgl => new Promise(resolve => whenIdle(() => resolve(mapboxgl), 2000))).then(mapboxgl => {
+    if (!el.isConnected || el._mapboxMap) return; // navigated away while the script loaded
 
-  const observer = new IntersectionObserver(([entry]) => {
-    if (!entry.isIntersecting) return;
-    observer.disconnect();
-
-    loadMapboxGL().then(mapboxgl => new Promise(resolve => whenIdle(() => resolve(mapboxgl), 1000))).then(mapboxgl => {
-      if (!el.isConnected) return; // navigated away while the script loaded
-
-      mapboxgl.accessToken = el.dataset.mapboxToken;
-      const map = new mapboxgl.Map({
-        container: el,
-        style: el.dataset.mapboxStyle,
-        attributionControl: false,
-        // Drag pans the map with a mouse. Touch screens keep the two-finger
-        // gesture so a swipe past the map still scrolls the page.
-        cooperativeGestures: window.matchMedia('(pointer: coarse)').matches
-      });
-      // The wheel belongs to the page (Lenis); zooming is by the +/- buttons,
-      // double-click or pinch.
-      map.scrollZoom.disable();
-      map.addControl(new mapboxgl.AttributionControl({ compact: true }));
-      map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
-      el._mapboxMap = map;
-    }).catch(error => console.warn('[map]', error));
-  }, { rootMargin: '1000px 0px' });
-
-  observer.observe(el);
-  el._mapboxObserver = observer;
+    mapboxgl.accessToken = el.dataset.mapboxToken;
+    const map = new mapboxgl.Map({
+      container: el,
+      style: el.dataset.mapboxStyle,
+      attributionControl: false,
+      // Drag pans the map with a mouse. Touch screens keep the two-finger
+      // gesture so a swipe past the map still scrolls the page.
+      cooperativeGestures: window.matchMedia('(pointer: coarse)').matches
+    });
+    // The wheel belongs to the page (Lenis); zooming is by the +/- buttons,
+    // double-click or pinch.
+    map.scrollZoom.disable();
+    map.addControl(new mapboxgl.AttributionControl({ compact: true }));
+    map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
+    el._mapboxMap = map;
+  }).catch(error => console.warn('[map]', error));
 }
 
 function destroyMapboxMaps(container) {
   container.querySelectorAll('[data-mapbox-map]').forEach(el => {
-    if (el._mapboxObserver) el._mapboxObserver.disconnect();
     if (el._mapboxMap) el._mapboxMap.remove();
-    el._mapboxObserver = el._mapboxMap = null;
+    el._mapboxMap = null;
   });
 }
 
