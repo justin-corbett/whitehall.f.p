@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b349';
+const BUILD = 'b352';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1117,8 +1117,12 @@ const PRELOADER_KEY = 'wh-preloader-seen'; // timestamp of the last play; the he
 const PRELOADER_EXPIRY = 24 * 60 * 60 * 1000; // plays again once a day
 // Where it is skipped: the Webflow staging site (*.webflow.io), so tests there
 // run without it; ?preloader=off anywhere; and Lighthouse via PageSpeed Insights
-// or the CLI, which name themselves in the user agent. Skipping doesn't count as
-// a visit. ?preloader plays it regardless, to check the animation.
+// or the CLI, which name themselves in the user agent. Those skips don't count
+// as a visit. ?preloader=off does: it also marks the browser as having seen the
+// preloader for the next day, so a Lighthouse run in DevTools (which looks like
+// an ordinary visitor) can be kept clear of it by opening the site once with
+// ?preloader=off in the same browser window first. ?preloader plays it
+// regardless, to check the animation.
 const PRELOADER_PARAM = new URLSearchParams(location.search).get('preloader');
 const PRELOADER_FORCE = PRELOADER_PARAM !== null && PRELOADER_PARAM !== 'off';
 const PRELOADER_OFF = !PRELOADER_FORCE && (
@@ -1169,6 +1173,7 @@ async function runPreloader(container) {
 
   const lastSeen = Number(localStorage.getItem(PRELOADER_KEY));
   if (PRELOADER_OFF || (Date.now() - lastSeen < PRELOADER_EXPIRY && !PRELOADER_FORCE)) {
+    if (PRELOADER_PARAM === 'off') localStorage.setItem(PRELOADER_KEY, Date.now());
     preloader.remove();
     return;
   }
