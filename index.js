@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b353';
+const BUILD = 'b354';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -934,8 +934,12 @@ function resetTurnstile() {
 // The Contact page's map is a plain Mapbox GL JS map instead of Studio's
 // iframe, so the page's own CSS can style its controls. Markup lives in the
 // Webflow embed: <div data-mapbox-map data-mapbox-token data-mapbox-style>.
-// GL JS (~200 KB) is only fetched once the map is about to scroll into view,
-// so it costs nothing on any other page or on first paint.
+// GL JS is 1.6 MB once unpacked, and a phone needs a few hundred milliseconds
+// of solid main-thread time to compile it. Compiled while the visitor is
+// scrolling toward the map, that shows up as the page freezing. So the library
+// is fetched and compiled in an idle moment shortly after the Contact page
+// shows, and the map itself is built a screen or two before it scrolls into
+// view. Other pages never load it, so it costs nothing on first paint.
 // Must be at least as new as the Studio that last saved the style: styles
 // saved by a newer Studio use syntax older GL JS rejects.
 const MAPBOX_GL_VERSION = 'v3.19.1';
@@ -965,15 +969,23 @@ function loadMapboxGL() {
   return mapboxLoader;
 }
 
+// Runs `fn` when the browser is idle (or after a short wait where it has no
+// idle callback, as in Safari), but never later than `timeout` ms.
+const whenIdle = (fn, timeout) => (window.requestIdleCallback
+  ? window.requestIdleCallback(fn, { timeout })
+  : setTimeout(fn, Math.min(timeout, 1500)));
+
 function initMapboxMap(scope) {
   const el = scope.querySelector('[data-mapbox-map]');
   if (!el) return;
+
+  whenIdle(() => loadMapboxGL().catch(error => console.warn('[map]', error)), 4000);
 
   const observer = new IntersectionObserver(([entry]) => {
     if (!entry.isIntersecting) return;
     observer.disconnect();
 
-    loadMapboxGL().then(mapboxgl => {
+    loadMapboxGL().then(mapboxgl => new Promise(resolve => whenIdle(() => resolve(mapboxgl), 1000))).then(mapboxgl => {
       if (!el.isConnected) return; // navigated away while the script loaded
 
       mapboxgl.accessToken = el.dataset.mapboxToken;
@@ -992,7 +1004,7 @@ function initMapboxMap(scope) {
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
       el._mapboxMap = map;
     }).catch(error => console.warn('[map]', error));
-  }, { rootMargin: '300px 0px' });
+  }, { rootMargin: '1000px 0px' });
 
   observer.observe(el);
   el._mapboxObserver = observer;
