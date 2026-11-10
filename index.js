@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b357';
+const BUILD = 'b360';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1189,6 +1189,9 @@ async function runPreloader(container) {
     return;
   }
   localStorage.setItem(PRELOADER_KEY, Date.now());
+  // The bars match the panel while it plays; the caller returns them to the
+  // page's colour as it wipes away, which is a real change Safari re-reads.
+  setBrowserChromeColor(getComputedStyle(preloader).backgroundColor);
 
   await new Promise(resolve => Webflow.push(resolve));
   getPreloaderLottie(preloader)?.goToAndPlay(0, true);
@@ -1275,6 +1278,27 @@ function setBrowserChromeColor(color) {
   }
   meta.content = hex;
   document.documentElement.style.backgroundColor = hex;
+  chromeEdgeStrips().forEach((strip) => { strip.style.backgroundColor = hex; });
+}
+
+// Two fixed strips along the top and bottom edges, kept behind the page. Newer
+// Safari (and the in-app browsers built on it) colours its bars from the fixed
+// elements touching those edges and ignores theme-color, so these are the
+// handle that makes the bars follow setBrowserChromeColor. Being the page's own
+// colour and sitting behind its content, they are never seen themselves.
+let chromeStrips = null;
+function chromeEdgeStrips() {
+  if (!chromeStrips) {
+    chromeStrips = ['top', 'bottom'].map((edge) => {
+      const strip = document.createElement('div');
+      strip.setAttribute('aria-hidden', 'true');
+      strip.setAttribute('data-chrome-edge', edge);
+      strip.style.cssText = `position:fixed;left:0;right:0;${edge}:0;height:120px;z-index:-1;pointer-events:none;`;
+      document.body.appendChild(strip);
+      return strip;
+    });
+  }
+  return chromeStrips;
 }
 
 // Same easing as the body background's own tween (see runPageLeaveAnimation),
@@ -5088,13 +5112,23 @@ function initHeroAboutParallax(scope) {
   // keep it fixed in place and just fade the overlay.
   heroAboutParallaxMM = gsap.matchMedia();
   heroAboutParallaxMM.add({ moves: '(min-width: 768px)', always: '(min-width: 0px)' }, (ctx) => {
+    // Once the next section is flush with the top, the page covers the hero
+    // completely. The hero is position:fixed, and Safari and in-app browsers
+    // tint their top and bottom bars from fixed elements at the screen edges,
+    // so a covered hero (plus its dark overlay) kept the bars green. Hidden
+    // while covered, the bars take the page's own colour. It goes back on
+    // scrolling up.
+    const setCovered = (covered) => { if (hero) hero.style.visibility = covered ? 'hidden' : ''; };
     const tl = gsap.timeline({
       scrollTrigger: {
         trigger: trigger,
         start: 'top bottom',
         end: 'top top',
         scrub: true,
-        invalidateOnRefresh: true
+        invalidateOnRefresh: true,
+        onLeave: () => setCovered(true),
+        onEnterBack: () => setCovered(false),
+        onRefresh: (self) => setCovered(self.progress === 1)
       }
     });
 
@@ -5104,6 +5138,8 @@ function initHeroAboutParallax(scope) {
     if (overlay) {
       tl.fromTo(overlay, { opacity: 0 }, { opacity: 0.5, ease: 'none' }, 0);
     }
+
+    return () => setCovered(false); // matchMedia cleanup: the hero must not stay hidden
   });
 }
 
@@ -5445,8 +5481,11 @@ function initColorZones(scope) {
     gsap.set(navTargets, { color: navDefaultOverride });
   }
 
+  // The browser's bars follow the page colour as the zones change it.
+  const syncBars = () => setBrowserChromeColor(getComputedStyle(target).backgroundColor);
+
   const revertToDefault = () => {
-    gsap.to(target, { backgroundColor: defaultBg, color: defaultText, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
+    gsap.to(target, { backgroundColor: defaultBg, color: defaultText, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto', onUpdate: syncBars });
     navTargets.forEach((el, i) => {
       gsap.to(el, { color: defaultNavColors[i], duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
     });
@@ -5457,7 +5496,7 @@ function initColorZones(scope) {
     if (!trigger) return;
 
     const setZone = () => {
-      gsap.to(target, { backgroundColor: bg, color: text, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
+      gsap.to(target, { backgroundColor: bg, color: text, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto', onUpdate: syncBars });
       if (navTargets.length) gsap.to(navTargets, { color: text, duration: COLOR_ZONE_DURATION, ease: WH_EASE, overwrite: 'auto' });
 
       // Retint any buttons that live inside this zone's own section —
