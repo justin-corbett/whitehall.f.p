@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b364';
+const BUILD = 'b368';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -441,6 +441,18 @@ function initCurrentYear(scope) {
     if (!update(el, yearPattern)) el.textContent = year;
   });
   root.querySelectorAll('.section__footer').forEach((el) => update(el, /©\s*(19|20)\d{2}/));
+}
+
+// The CTA stickers hang past the screen edge, so the section has to clip
+// sideways or they add horizontal scroll. overflow-x: clip beside overflow-y:
+// visible makes Safari clip the top too, cutting the stickers off. A clip-path
+// that is exactly the section's width but reaches far above and below it
+// clips sideways only, the same in every browser.
+function initSidewaysClip(scope) {
+  (scope || document).querySelectorAll('.section__cta').forEach((section) => {
+    section.style.overflow = 'visible';
+    section.style.clipPath = 'inset(-100vh 0)';
+  });
 }
 
 function initOnceFunctions() {
@@ -1011,6 +1023,7 @@ function destroyMapboxMaps(container) {
 function initAfterEnterFunctions(next) {
   nextPage = next || document;
 
+  initSidewaysClip(nextPage);
   initWebflowForms(); // b124 — see WEBFLOW SPA FORMS + TURNSTILE RESET above
 
   // Runs after enter animation completes.
