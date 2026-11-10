@@ -1140,6 +1140,7 @@ const PRELOADER_FADE_AT = 2.6; // seconds in when the Lottie starts fading, ahea
 const PRELOADER_LIFT = -200; // yPercent the Lottie is pulled up by the wipe
 const PRELOADER_WIPE = { duration: 0.9, ease: WH_EASE };
 const PRELOADER_INTRO_AT = 0.5; // seconds into the wipe when the page intro starts (the ease is visually done by then)
+const PRELOADER_TINT_HOLD = 1; // seconds the hidden panel stays, in the page colour, so Safari re-tints its bars before it goes
 
 function getPreloaderLottie(preloader) {
   const lottie = Webflow.require('lottie')?.lottie;
@@ -1188,8 +1189,19 @@ async function runPreloader(container) {
   });
   await Promise.all([waitSeconds(PRELOADER_HOLD), waitForHeroVideo(container)]);
 
+  // Safari 26 tints its toolbars from a fixed full-screen element like this
+  // panel (green while it plays) but doesn't re-tint when the element is
+  // removed, so the bars stay green. Once the wipe has clipped the panel out
+  // of sight, switch its colour to the page's so Safari picks that up, and
+  // only remove it a moment later.
+  const pageBg = getContainerBg(container) || getComputedStyle(document.body).backgroundColor;
+  const finishPreloader = () => {
+    gsap.set(preloader, { backgroundColor: pageBg });
+    gsap.delayedCall(PRELOADER_TINT_HOLD, () => preloader.remove());
+  };
+
   await new Promise(resolve => {
-    const tl = gsap.timeline({ onComplete: () => preloader.remove() });
+    const tl = gsap.timeline({ onComplete: finishPreloader });
     tl.to(lottieEl, { yPercent: PRELOADER_LIFT, ...PRELOADER_WIPE }, 0);
     tl.to(preloader, { clipPath: 'inset(0% 0% 100% 0%)', ...PRELOADER_WIPE }, 0);
     tl.call(resolve, null, PRELOADER_INTRO_AT);
