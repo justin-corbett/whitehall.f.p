@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b345';
+const BUILD = 'b346';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -2181,6 +2181,21 @@ const REVEAL_SEQUENCES = [
 
 const sequenceFor = el => REVEAL_SEQUENCES.find(seq => el.closest(seq.root));
 
+// A reveal whose start lies past the end of the page never fires. That is what
+// happens to text near the bottom (the footer), most of all on phones, where
+// the browser bar and in-app toolbars change the viewport height. The start is
+// held back to the page's last scroll position, so the reveal always plays.
+// Only "top N%" starts are rewritten; anything else is passed through.
+function revealStart(el, start) {
+  const match = /^top\s+(\d+(?:\.\d+)?)%$/.exec(start);
+  if (!match) return start;
+  const fraction = parseFloat(match[1]) / 100;
+  return () => {
+    const top = el.getBoundingClientRect().top + window.scrollY;
+    return Math.max(0, Math.min(top - fraction * window.innerHeight, ScrollTrigger.maxScroll(window) - 2));
+  };
+}
+
 // An entry tagged with heroSection is fired by activateDisplayLargeReveal
 // instead (in the same callback as the title's own reveal), so it never gets a
 // trigger of its own here: that would double-animate it.
@@ -2209,7 +2224,7 @@ function activateLineReveal(prepared) {
   (prepared || [])
     .filter(entry => !entry.heroSection && !sequenceFor(entry.trigger))
     .forEach(entry => {
-      ScrollTrigger.create({ trigger: entry.trigger, start: entry.start, once: true, onEnter: () => playLineEntry(entry) });
+      ScrollTrigger.create({ trigger: entry.trigger, start: revealStart(entry.trigger, entry.start), once: true, onEnter: () => playLineEntry(entry) });
     });
 }
 
@@ -2261,7 +2276,7 @@ function activateRevealSequences({ lines, rules, images }) {
       const lead = group.items[0];
       ScrollTrigger.create({
         trigger: lead.el,
-        start: lead.start,
+        start: revealStart(lead.el, lead.start),
         once: true,
         onEnter: () => {
           const now = gsap.ticker.time;
