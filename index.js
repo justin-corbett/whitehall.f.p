@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b347';
+const BUILD = 'b348';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -2221,7 +2221,9 @@ function revealStart(el, start) {
   const fraction = parseFloat(match[1]) / 100;
   return () => {
     const top = el.getBoundingClientRect().top + window.scrollY;
-    return Math.max(0, Math.min(top - fraction * window.innerHeight, ScrollTrigger.maxScroll(window) - 2));
+    // Not floored at 0: text already in view at the top of the page has a
+    // negative start, which is what makes its reveal fire straight away.
+    return Math.min(top - fraction * window.innerHeight, ScrollTrigger.maxScroll(window) - 2);
   };
 }
 
