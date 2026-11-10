@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b356';
+const BUILD = 'b357';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1257,6 +1257,41 @@ function getContainerBg(el) {
   return c;
 }
 
+// Colours the browser's own chrome (the phone's status bar and toolbars, the
+// overscroll area) to match the page. Safari and in-app browsers tint their
+// bars from the theme-color tag and the page background, and a full-screen
+// fixed panel such as the preloader can leave them stuck on its colour, so both
+// are set explicitly and kept in step with the page: on first load, after the
+// preloader and on every page change.
+function setBrowserChromeColor(color) {
+  if (!color) return;
+  const [r, g, b] = gsap.utils.splitColor(color);
+  const hex = '#' + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    document.head.appendChild(meta);
+  }
+  meta.content = hex;
+  document.documentElement.style.backgroundColor = hex;
+}
+
+// Same easing as the body background's own tween (see runPageLeaveAnimation),
+// so the bars and the page change colour together.
+function easeBrowserChromeTo(color) {
+  const proxy = { color: getComputedStyle(document.documentElement).backgroundColor };
+  if (!proxy.color || /,\s*0\)$/.test(proxy.color)) proxy.color = pageBaseBg;
+  gsap.to(proxy, {
+    color,
+    duration: TRANSITION_BG_DURATION,
+    ease: WH_EASE,
+    overwrite: true,
+    onUpdate: () => setBrowserChromeColor(proxy.color),
+    onComplete: () => setBrowserChromeColor(color)
+  });
+}
+
 // The persistent nav logo and Menu label are tinted inline by the colour
 // zones and by a page's data-nav-default-color. When the next page wants a
 // different colour, start easing there as the transition begins rather than
@@ -1381,8 +1416,10 @@ function runPageLeaveAnimation(current, next) {
   if (navWasOpenForTransition) {
     // Menu is covering the page — swap colour/content instantly behind it.
     gsap.set(document.body, { backgroundColor: toBg });
+    setBrowserChromeColor(toBg);
   } else {
     gsap.to(document.body, { backgroundColor: toBg, duration: TRANSITION_BG_DURATION, ease: WH_EASE, overwrite: 'auto' });
+    easeBrowserChromeTo(toBg);
   }
   transitionNextBg = toBg;
 
@@ -1805,6 +1842,11 @@ barba.init({
       async once(data) {
         initOnceFunctions();
         resetScrollToTop();
+        // Colour the browser's bars before anything covers the screen (the
+        // preloader's green panel would otherwise decide it), and again once it
+        // has gone.
+        if (pageBaseBg === null) pageBaseBg = getComputedStyle(document.body).backgroundColor;
+        setBrowserChromeColor(getContainerBg(data.next.container));
         // b127 — if this first page isn't Home, warm Home's hero video in the
         // background once the page has loaded (no-op on Home).
         schedulePreloadHomeHeroVideo();
@@ -1817,6 +1859,7 @@ barba.init({
         // The page is hidden by the site head until its intro state is set (no flash of final content).
         document.documentElement.classList.remove('wh-loading');
         await runPreloader(data.next.container);
+        setBrowserChromeColor(getContainerBg(data.next.container));
         resetScrollToTop();
         playOnceAnimation(intro);
       },
