@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b355';
+const BUILD = 'b356';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1172,6 +1172,15 @@ function waitForHeroVideo(container) {
 async function runPreloader(container) {
   const preloader = document.querySelector('[data-preloader]');
   if (!preloader) return;
+
+  // The stylesheet sizes the panel 100vw x 100vh. On phones 100vh is the
+  // viewport with the browser toolbars tucked away, so the panel can reach past
+  // the visible screen. Safari and in-app browsers tint their top and bottom
+  // bars from the fixed element at each edge, and a panel that overshoots the
+  // bottom leaves the two bars in different colours. Letting position:fixed +
+  // inset:0 size it makes it match the visible viewport exactly.
+  preloader.style.width = 'auto';
+  preloader.style.height = 'auto';
 
   const lastSeen = Number(localStorage.getItem(PRELOADER_KEY));
   if (PRELOADER_OFF || (Date.now() - lastSeen < PRELOADER_EXPIRY && !PRELOADER_FORCE)) {
