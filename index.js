@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b369';
+const BUILD = 'b371';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -441,27 +441,6 @@ function initCurrentYear(scope) {
     if (!update(el, yearPattern)) el.textContent = year;
   });
   root.querySelectorAll('.section__footer').forEach((el) => update(el, /©\s*(19|20)\d{2}/));
-}
-
-// The CTA stickers hang past the screen edge, so something has to stop them
-// adding horizontal scroll. On the section itself, overflow-x: clip beside
-// overflow-y: visible makes Safari clip the top too, cutting the stickers off,
-// and a clip-path only hides them without removing the scrollable width. So
-// the section is left free to overflow and the sideways clip sits on the
-// viewport (html), which is not a scroll container of its own and so cannot
-// disturb sticky or the sections inside. It is a stylesheet rule rather than
-// an inline style so the preloader's scroll lock, which sets and clears
-// html's inline overflow, cannot wipe it.
-function initSidewaysClip(scope) {
-  if (!document.getElementById('wh-sideways-clip')) {
-    const style = document.createElement('style');
-    style.id = 'wh-sideways-clip';
-    style.textContent = 'html { overflow-x: clip; }';
-    document.head.appendChild(style);
-  }
-  (scope || document).querySelectorAll('.section__cta').forEach((section) => {
-    section.style.overflow = 'visible';
-  });
 }
 
 function initOnceFunctions() {
@@ -1032,7 +1011,6 @@ function destroyMapboxMaps(container) {
 function initAfterEnterFunctions(next) {
   nextPage = next || document;
 
-  initSidewaysClip(nextPage);
   initWebflowForms(); // b124 — see WEBFLOW SPA FORMS + TURNSTILE RESET above
 
   // Runs after enter animation completes.
