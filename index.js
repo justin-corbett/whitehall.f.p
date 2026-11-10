@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b348';
+const BUILD = 'b349';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1699,7 +1699,47 @@ barba.hooks.enter(data => {
   updateNavRestingColors();
 })
 
+// -----------------------------------------
+// ANALYTICS
+// -----------------------------------------
+// Barba never reloads the document, so Google Analytics' automatic pageview
+// fires once for the whole session. The tag must be configured with
+// send_page_view: false in Webflow's head code (see the snippet in the
+// handover notes); every view, including the first, is sent from here, so one
+// code path counts them all.
+//
+// Guarded rather than assumed: the tag is third-party, loads async and can be
+// blocked outright, and a missing gtag must not break the page pipeline.
+//
+// Staging and local hosts are skipped. Design reviews and test sessions on
+// webflow.io would otherwise be indistinguishable from real visits in GA4.
+// Suffix matching covers branch previews too. To test the tag itself, add
+// ?analytics=on to a staging URL.
+const ANALYTICS_IGNORED_HOSTS = ['.webflow.io', 'localhost', '127.0.0.1'];
+
+function analyticsDisabled() {
+  if (new URLSearchParams(location.search).get('analytics') === 'on') return false;
+  const host = window.location.hostname;
+  return ANALYTICS_IGNORED_HOSTS.some((h) => host === h || host.endsWith(h));
+}
+
+function trackPageView() {
+  if (analyticsDisabled()) return;
+  if (typeof window.gtag !== 'function') return;
+  window.gtag('event', 'page_view', {
+    // Read at call time. Barba swaps document.title as part of the transition,
+    // so by afterEnter this is already the incoming page's.
+    page_title: document.title,
+    page_location: window.location.href,
+    page_path: window.location.pathname + window.location.search
+  });
+}
+
 barba.hooks.afterEnter(data => {
+  // Fires for the once lifecycle as well as page transitions, so this is the
+  // single place a view is counted.
+  trackPageView();
+
   // Run page functions
   initAfterEnterFunctions(data.next.container);
 
