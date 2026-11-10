@@ -1146,6 +1146,13 @@ function getPreloaderLottie(preloader) {
   return animations.find(anim => preloader.contains(anim.wrapper));
 }
 
+function lockPreloaderScroll(locked) {
+  document.documentElement.style.overflow = locked ? 'hidden' : '';
+  if (!lenis) return;
+  if (locked) lenis.stop();
+  else lenis.start();
+}
+
 function waitSeconds(seconds) {
   return new Promise(resolve => gsap.delayedCall(seconds, resolve));
 }
@@ -1179,6 +1186,10 @@ async function runPreloader(container) {
     return;
   }
   localStorage.setItem(PRELOADER_KEY, Date.now());
+  // The panel is position: absolute (a fixed one makes Safari 26 tint its
+  // toolbars green), so it would scroll away with the page: hold the page
+  // still, Lenis and native/touch scrolling both, until the wipe is done.
+  lockPreloaderScroll(true);
   await new Promise(resolve => Webflow.push(resolve));
   getPreloaderLottie(preloader)?.goToAndPlay(0, true);
   const lottieEl = preloader.querySelector('[data-preloader-lottie]');
@@ -1188,7 +1199,12 @@ async function runPreloader(container) {
   await Promise.all([waitSeconds(PRELOADER_HOLD), waitForHeroVideo(container)]);
 
   await new Promise(resolve => {
-    const tl = gsap.timeline({ onComplete: () => preloader.remove() });
+    const tl = gsap.timeline({
+      onComplete: () => {
+        preloader.remove();
+        lockPreloaderScroll(false);
+      }
+    });
     tl.to(lottieEl, { yPercent: PRELOADER_LIFT, ...PRELOADER_WIPE }, 0);
     tl.to(preloader, { clipPath: 'inset(0% 0% 100% 0%)', ...PRELOADER_WIPE }, 0);
     tl.call(resolve, null, PRELOADER_INTRO_AT);
