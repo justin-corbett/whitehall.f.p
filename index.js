@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b346';
+const BUILD = 'b347';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -416,7 +416,35 @@ function schedulePreloadHomeHeroVideo() {
   else window.addEventListener('load', start, { once: true });
 }
 
+// Keeps the copyright year current. An element tagged [data-current-year]
+// shows the year (a 4-digit year already in its text is swapped, otherwise
+// the year becomes its text). With no tag, a "© 2025" style notice in the
+// footer is updated too. Text nodes are edited in place, so it is safe before
+// or after the text has been split into lines.
+function initCurrentYear(scope) {
+  const year = String(new Date().getFullYear());
+  const root = scope || document;
+  const yearPattern = /\b(19|20)\d{2}\b/;
+  const update = (el, pattern) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let found = false;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (pattern.test(node.nodeValue)) {
+        node.nodeValue = node.nodeValue.replace(pattern, (m, ...args) => m.replace(yearPattern, year));
+        found = true;
+      }
+    }
+    return found;
+  };
+  root.querySelectorAll('[data-current-year]').forEach((el) => {
+    if (!update(el, yearPattern)) el.textContent = year;
+  });
+  root.querySelectorAll('.section__footer').forEach((el) => update(el, /©\s*(19|20)\d{2}/));
+}
+
 function initOnceFunctions() {
+  initCurrentYear(document);
   initLenis();
   if (onceFunctionsInitialized) return;
   onceFunctionsInitialized = true;
@@ -2073,6 +2101,7 @@ function restoreUnderlines(el) {
 }
 
 function prepareLineReveal(scope) {
+  initCurrentYear(scope);
   if (typeof SplitText === "undefined" || typeof ScrollTrigger === "undefined") return [];
   spaceInlineRuns(scope);
 
