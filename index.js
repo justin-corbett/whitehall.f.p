@@ -123,7 +123,7 @@ gsap.defaults({ ease: WH_EASE, duration: durationDefault });
 // -----------------------------------------
 // Build tag
 // -----------------------------------------
-const BUILD = 'b362';
+const BUILD = 'b364';
 
 // Belt-and-suspenders hard reset, called alongside forceResetNavLinks()
 // in barba.hooks.before: explicitly re-asserts every nav-char back to
@@ -1140,17 +1140,11 @@ const PRELOADER_FADE_AT = 2.6; // seconds in when the Lottie starts fading, ahea
 const PRELOADER_LIFT = -200; // yPercent the Lottie is pulled up by the wipe
 const PRELOADER_WIPE = { duration: 0.9, ease: WH_EASE };
 const PRELOADER_INTRO_AT = 0.5; // seconds into the wipe when the page intro starts (the ease is visually done by then)
+
 function getPreloaderLottie(preloader) {
   const lottie = Webflow.require('lottie')?.lottie;
   const animations = lottie ? lottie.getRegisteredAnimations() : [];
   return animations.find(anim => preloader.contains(anim.wrapper));
-}
-
-function lockPreloaderScroll(locked) {
-  document.documentElement.style.overflow = locked ? 'hidden' : '';
-  if (!lenis) return;
-  if (locked) lenis.stop();
-  else lenis.start();
 }
 
 function waitSeconds(seconds) {
@@ -1186,10 +1180,6 @@ async function runPreloader(container) {
     return;
   }
   localStorage.setItem(PRELOADER_KEY, Date.now());
-  // The panel is position: absolute (a fixed one makes Safari 26 tint its
-  // toolbars green), so it would scroll away with the page: hold the page
-  // still, Lenis and native/touch scrolling both, until the wipe is done.
-  lockPreloaderScroll(true);
   await new Promise(resolve => Webflow.push(resolve));
   getPreloaderLottie(preloader)?.goToAndPlay(0, true);
   const lottieEl = preloader.querySelector('[data-preloader-lottie]');
@@ -1199,12 +1189,7 @@ async function runPreloader(container) {
   await Promise.all([waitSeconds(PRELOADER_HOLD), waitForHeroVideo(container)]);
 
   await new Promise(resolve => {
-    const tl = gsap.timeline({
-      onComplete: () => {
-        preloader.remove();
-        lockPreloaderScroll(false);
-      }
-    });
+    const tl = gsap.timeline({ onComplete: () => preloader.remove() });
     tl.to(lottieEl, { yPercent: PRELOADER_LIFT, ...PRELOADER_WIPE }, 0);
     tl.to(preloader, { clipPath: 'inset(0% 0% 100% 0%)', ...PRELOADER_WIPE }, 0);
     tl.call(resolve, null, PRELOADER_INTRO_AT);
@@ -1744,9 +1729,21 @@ function analyticsDisabled() {
   return ANALYTICS_IGNORED_HOSTS.some((h) => host === h || host.endsWith(h));
 }
 
+// gtag('config') sends a page view of its own unless it was given
+// send_page_view: false, and it does so before this script runs. Counting the
+// first view here as well would double it, so the config call is checked.
+function gaCountsFirstView() {
+  return (window.dataLayer || []).some((entry) => entry && entry[0] === 'config' && !(entry[2] && entry[2].send_page_view === false));
+}
+
+let firstViewChecked = false;
 function trackPageView() {
   if (analyticsDisabled()) return;
   if (typeof window.gtag !== 'function') return;
+  if (!firstViewChecked) {
+    firstViewChecked = true;
+    if (gaCountsFirstView()) return;
+  }
   window.gtag('event', 'page_view', {
     // Read at call time. Barba swaps document.title as part of the transition,
     // so by afterEnter this is already the incoming page's.
@@ -5483,7 +5480,13 @@ function buildRollPairs(textNode) {
   textNode.textContent = '';
 
   const wrap = document.createElement('span');
-  wrap.style.cssText = 'display:inline-block;overflow:hidden;position:relative;vertical-align:top;';
+  // The words get vertical padding so their boxes are taller than the line
+  // height. Descenders (g, y, p) reach below a tight line box; without the
+  // padding the clip cut them off, and while rolled out the overflow showed
+  // at the opposite edge. The negative margin hands the space back, so the
+  // button's size is unchanged.
+  const PAD = '0.2em';
+  wrap.style.cssText = `display:inline-block;overflow:hidden;position:relative;vertical-align:top;margin:-${PAD} 0;`;
   textNode.parentNode.insertBefore(wrap, textNode);
   // textNode's own content already moved into origEl/cloneEl below — it's
   // now an empty leftover. Left in place it becomes a second flex child
@@ -5492,13 +5495,13 @@ function buildRollPairs(textNode) {
   textNode.remove();
 
   const origEl = document.createElement('span');
-  origEl.style.cssText = 'display:block;';
+  origEl.style.cssText = `display:block;padding:${PAD} 0;`;
   origEl.textContent = label;
   wrap.appendChild(origEl);
 
   const cloneEl = document.createElement('span');
   cloneEl.setAttribute('aria-hidden', 'true');
-  cloneEl.style.cssText = 'display:block;white-space:nowrap;';
+  cloneEl.style.cssText = `display:block;white-space:nowrap;padding:${PAD} 0;`;
   cloneEl.textContent = label;
   wrap.appendChild(cloneEl);
 
